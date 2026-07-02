@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "armature-mcp-analytics"
+version = "0.0.0"
+description = "Armature analytics wrapper SDK for Python MCP servers."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+authors = [
+  { name = "Armature", email = "support@armature.tech" },
+]
+keywords = [
+  "mcp",
+  "model-context-protocol",
+  "analytics",
+  "telemetry",
+  "observability",
+  "armature",
+  "fastmcp",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.optional-dependencies]
+fastmcp = [
+  "fastmcp>=2,<4",
+]
+mcp = [
+  "mcp>=1.27,<2",
+]
+
+[project.urls]
+Homepage = "https://armature.tech"
+Repository = "https://github.com/armature-tech/mcp-analytics-python"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/armature_mcp_analytics"]

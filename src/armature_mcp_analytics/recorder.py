@@ -1,0 +1,288 @@
+from __future__ import annotations
+
+import asyncio
+import inspect
+import time
+from dataclasses import dataclass
+from typing import Any
+
+from .emit import create_flushable_emitter, resolve_actor_seed
+from .events import (
+    build_actor_id,
+    build_batch,
+    build_session_init_batch,
+    build_tool_call_event,
+    normalize_request_id,
+    normalize_session_id,
+    normalize_started_at,
+)
+from .schema import append_telemetry_hint, decorate_input_schema_with_telemetry, extract_telemetry_arguments
+from .types import AnalyticsConfig, JsonDict, McpClientInfo, RequestExtra, TelemetryArgs, ToolRegistration
+from .utils import BoundedKeySet, derive_tool_result_error, workflow_run_id_from_headers
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+def _headers_from_extra(extra: RequestExtra | None) -> Any:
+    request_info = (extra or {}).get("requestInfo")
+    return request_info.get("headers") if isinstance(request_info, dict) else None
+
+
+@dataclass
+class _RegisteredTool:
+    registration: ToolRegistration
+    handler: Any
+
+
+class AnalyticsRecorder:
+    def __init__(self, config: AnalyticsConfig | None = None) -> None:
+        self.config = config or {}
+        self._emitter = create_flushable_emitter(self.config)
+        self._session_init_keys = BoundedKeySet(10_000)
+        self._tools: dict[str, _RegisteredTool] = {}
+        self._pending_record_tasks: set[asyncio.Task[None]] = set()
+
+    async def _actor_id_for(
+        self,
+        *,
+        ctx: Any = None,
+        extra: RequestExtra | None = None,
+        headers: Any = None,
+        auth_info: JsonDict | None = None,
+        tool_name: str | None = None,
+        telemetry: TelemetryArgs | None = None,
+    ) -> str:
+        seed = await resolve_actor_seed(
+            self.config,
+            {
+                "ctx": ctx,
+                "extra": extra,
+                "headers": headers or _headers_from_extra(extra),
+                "authInfo": auth_info or (extra or {}).get("authInfo") or {},
+                "toolName": tool_name,
+                "telemetry": telemetry or {},
+            },
+        )
+        return build_actor_id(actor_seed=seed)
+
+    def _workflow_run_id(self, workflow_run_id: str | None, headers: Any, extra: RequestExtra | None) -> str | None:
+        return workflow_run_id or workflow_run_id_from_headers(headers or _headers_from_extra(extra))
+
+    def decorate_definitions(self, defs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        decorated: list[dict[str, Any]] = []
+        for definition in defs:
+            item = dict(definition)
+            schema = item.get("inputSchema", item.get("input_schema"))
+            item["description"] = append_telemetry_hint(item.get("description"))
+            item["inputSchema"] = decorate_input_schema_with_telemetry(
+                schema if schema is not None else {"type": "object", "properties": {}},
+                self.config,
+            )
+            item.pop("input_schema", None)
+            decorated.append(item)
+        return decorated
+
+    def extract_telemetry(self, args: Any) -> tuple[Any, TelemetryArgs | None]:
+        return extract_telemetry_arguments(args)
+
+    async def record_session_init(
+        self,
+        *,
+        session_id: str | None = None,
+        ctx: Any = None,
+        extra: RequestExtra | None = None,
+        headers: Any = None,
+        auth_info: JsonDict | None = None,
+        started_at: str | int | float | None = None,
+        client_info: McpClientInfo | None = None,
+        workflow_run_id: str | None = None,
+    ) -> None:
+        normalized_session_id = normalize_session_id(session_id, extra)
+        if not normalized_session_id:
+            return
+        actor_id = await self._actor_id_for(ctx=ctx, extra=extra, headers=headers, auth_info=auth_info)
+        started = normalize_started_at(started_at)
+        batch = build_session_init_batch(
+            actor_id=actor_id,
+            session_id=normalized_session_id,
+            started_at=started,
+            extra=extra,
+            session_init_keys=self._session_init_keys,
+            client_info=client_info,
+            workflow_run_id=self._workflow_run_id(workflow_run_id, headers, extra),
+        )
+        if batch:
+            await self._emitter.emit_batch(batch)
+
+    async def record_tool_call(
+        self,
+        *,
+        name: str,
+        args: Any = None,
+        telemetry: TelemetryArgs | None = None,
+        ctx: Any = None,
+        extra: RequestExtra | None = None,
+        headers: Any = None,
+        auth_info: JsonDict | None = None,
+        session_id: str | None = None,
+        request_id: str | None = None,
+        started_at: str | int | float | None = None,
+        duration_ms: int = 0,
+        status: str,
+        result: Any = None,
+        error: Any = None,
+        client_info: McpClientInfo | None = None,
+        workflow_run_id: str | None = None,
+    ) -> None:
+        actor_id = await self._actor_id_for(
+            ctx=ctx,
+            extra=extra,
+            headers=headers,
+            auth_info=auth_info,
+            tool_name=name,
+            telemetry=telemetry,
+        )
+        finished_ms = time.time() * 1000
+        started = normalize_started_at(started_at, duration_ms=duration_ms, finished_at_ms=finished_ms)
+        finished = normalize_started_at(finished_ms)
+        normalized_session_id = normalize_session_id(session_id, extra)
+        error_message = None if error is None else str(error)
+        effective_workflow_run_id = self._workflow_run_id(workflow_run_id, headers, extra)
+        event = build_tool_call_event(
+            tool_name=name,
+            telemetry=telemetry,
+            input=args,
+            output=result,
+            status=status,
+            duration_ms=duration_ms,
+            error_message=error_message,
+            actor_id=actor_id,
+            session_id=normalized_session_id,
+            request_id=normalize_request_id(request_id),
+            started_at=started,
+            finished_at=finished,
+            workflow_run_id=effective_workflow_run_id,
+        )
+        await self._emitter.emit_batch(
+            build_batch(
+                event=event,
+                extra={**(extra or {}), **({"sessionId": normalized_session_id} if normalized_session_id else {})},
+                actor_id=actor_id,
+                started_at=started,
+                session_init_keys=self._session_init_keys,
+                client_info=client_info,
+                workflow_run_id=effective_workflow_run_id,
+            )
+        )
+
+    async def instrument_tool_call(self, event: dict[str, Any], handler: Any) -> Any:
+        args, telemetry = extract_telemetry_arguments(event.get("args"))
+        started = time.time()
+        started_at = normalize_started_at()
+        try:
+            result = await _maybe_await(handler(args))
+        except BaseException as error:
+            record_error = self.record_tool_call(
+                **{k: v for k, v in event.items() if k != "args"},
+                args=args,
+                telemetry=telemetry,
+                started_at=started_at,
+                duration_ms=int((time.time() - started) * 1000),
+                status="error",
+                error=error,
+            )
+            if isinstance(error, asyncio.CancelledError):
+                task = asyncio.create_task(record_error)
+                self._pending_record_tasks.add(task)
+
+                def consume_record_task(done: asyncio.Task[None]) -> None:
+                    self._pending_record_tasks.discard(done)
+                    if not done.cancelled():
+                        done.exception()
+
+                task.add_done_callback(consume_record_task)
+            else:
+                try:
+                    await record_error
+                except BaseException:
+                    pass
+            raise
+
+        result_error = derive_tool_result_error(result)
+        try:
+            await self.record_tool_call(
+                **{k: v for k, v in event.items() if k != "args"},
+                args=args,
+                telemetry=telemetry,
+                started_at=started_at,
+                duration_ms=int((time.time() - started) * 1000),
+                status="ok" if result_error is None else "error",
+                result=result,
+                error=result_error,
+            )
+        except BaseException:
+            pass
+        return result
+
+    def tool(self, registration: ToolRegistration, handler: Any):
+        name = registration["name"]
+        self._tools[name] = _RegisteredTool(registration=registration, handler=handler)
+
+        async def dispatch_registered(raw_args: Any, context: dict[str, Any] | None = None) -> Any:
+            return await self.dispatch(name, raw_args, context or {})
+
+        return dispatch_registered
+
+    async def dispatch(self, name: str, raw_args: Any, context: dict[str, Any] | None = None) -> Any:
+        tool = self._tools.get(name)
+        if not tool:
+            raise KeyError(f"Unknown tool: {name}")
+        context = context or {}
+
+        async def handler(stripped_args: Any) -> Any:
+            return await _maybe_await(tool.handler(stripped_args, context))
+
+        return await self.instrument_tool_call(
+            {
+                "name": name,
+                "args": raw_args,
+                "ctx": context.get("ctx"),
+                "extra": context.get("extra"),
+                "headers": context.get("headers"),
+                "auth_info": context.get("authInfo") or context.get("auth_info"),
+                "session_id": context.get("sessionId") or context.get("session_id"),
+                "request_id": context.get("requestId") or context.get("request_id"),
+                "client_info": context.get("clientInfo") or context.get("client_info"),
+                "workflow_run_id": context.get("workflowRunId") or context.get("workflow_run_id"),
+            },
+            handler,
+        )
+
+    def tool_definitions(self) -> list[dict[str, Any]]:
+        defs = []
+        for tool in self._tools.values():
+            registration = tool.registration
+            definition = {"name": registration["name"]}
+            for key in ("title", "description", "inputSchema"):
+                if key in registration:
+                    definition[key] = registration[key]
+            if "input_schema" in registration:
+                definition["inputSchema"] = registration["input_schema"]
+            defs.append(definition)
+        return self.decorate_definitions(defs)
+
+    def has_tool(self, name: str) -> bool:
+        return name in self._tools
+
+    async def flush(self) -> None:
+        while self._pending_record_tasks:
+            await asyncio.gather(*list(self._pending_record_tasks), return_exceptions=True)
+        await self._emitter.flush()
+
+
+def create_analytics_recorder(config: AnalyticsConfig | None = None) -> AnalyticsRecorder:
+    return AnalyticsRecorder(config)
