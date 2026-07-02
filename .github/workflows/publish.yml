@@ -1,0 +1,140 @@
+name: Publish
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  id-token: write
+
+concurrency:
+  group: publish-pypi
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: github.repository == 'armature-tech/mcp-analytics-python'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check whether this commit is already released
+        id: existing_release
+        run: |
+          set -euo pipefail
+          tag="$(git tag --points-at HEAD --list 'v*' | sort -V | tail -1 || true)"
+          if [[ -n "${tag}" ]]; then
+            echo "Commit ${GITHUB_SHA} already has release tag ${tag}; skipping publish."
+            echo "published=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "published=false" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Setup Python
+        if: steps.existing_release.outputs.published != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run checks
+        if: steps.existing_release.outputs.published != 'true'
+        run: PYTHONPATH=src python -m unittest discover -s tests
+
+      - name: Resolve next patch version
+        if: steps.existing_release.outputs.published != 'true'
+        id: version
+        env:
+          INITIAL_VERSION: "0.1.0"
+        run: |
+          set -euo pipefail
+          python <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          import urllib.error
+          import urllib.request
+          from pathlib import Path
+
+          pyproject_path = Path("pyproject.toml")
+          text = pyproject_path.read_text()
+          name_match = re.search(r'^name = "([^"]+)"$', text, re.MULTILINE)
+          if not name_match:
+              raise SystemExit("Could not find project name in pyproject.toml")
+          package_name = name_match.group(1)
+
+          versions = []
+
+          def add_version(candidate):
+              if not isinstance(candidate, str):
+                  return
+              normalized = candidate.strip().removeprefix("v")
+              if re.fullmatch(r"\d+\.\d+\.\d+", normalized):
+                  versions.append(normalized)
+
+          try:
+              with urllib.request.urlopen(f"https://pypi.org/pypi/{package_name}/json", timeout=15) as response:
+                  data = json.load(response)
+              for version in data.get("releases", {}):
+                  add_version(version)
+          except urllib.error.HTTPError as error:
+              if error.code != 404:
+                  print(f"Could not read PyPI versions for {package_name}: HTTP {error.code}", file=sys.stderr)
+          except Exception as error:
+              print(f"Could not read PyPI versions for {package_name}: {error}", file=sys.stderr)
+
+          try:
+              subprocess.run(["git", "fetch", "--tags", "--force"], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+              tags = subprocess.check_output(["git", "tag", "-l", "v*"], text=True)
+              for tag in tags.splitlines():
+                  add_version(tag)
+          except Exception as error:
+              print(f"Could not read git tags: {error}", file=sys.stderr)
+
+          if versions:
+              def parsed(version):
+                  return tuple(int(part) for part in version.split("."))
+              major, minor, patch = max(parsed(version) for version in versions)
+              next_version = f"{major}.{minor}.{patch + 1}"
+          else:
+              next_version = os.environ["INITIAL_VERSION"]
+
+          text = re.sub(r'^version = "[^"]+"$', f'version = "{next_version}"', text, count=1, flags=re.MULTILINE)
+          pyproject_path.write_text(text)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"next_version={next_version}\n")
+          print(f"Publishing {package_name}=={next_version}")
+          PY
+
+      - name: Build distributions
+        if: steps.existing_release.outputs.published != 'true'
+        run: |
+          python -m pip install --upgrade build
+          python -m build
+          python -m tarfile -l dist/*.tar.gz
+          python -m zipfile -l dist/*.whl
+
+      - name: Publish
+        if: steps.existing_release.outputs.published != 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Create GitHub release
+        if: steps.existing_release.outputs.published != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NEXT_VERSION: ${{ steps.version.outputs.next_version }}
+        run: |
+          set -euo pipefail
+          gh release create "v${NEXT_VERSION}" \
+            --target "${GITHUB_SHA}" \
+            --title "v${NEXT_VERSION}" \
+            --notes "Published armature-mcp-analytics==${NEXT_VERSION} from ${GITHUB_SHA}."
