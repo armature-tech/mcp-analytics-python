@@ -46,3 +46,9 @@ Repository = "https://github.com/armature-tech/mcp-analytics-python"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/armature_mcp_analytics"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "/.github",
+  "/tests",
+]
