@@ -226,7 +226,9 @@ class FastMCPAdapterTests(unittest.TestCase):
 
         result = asyncio.run(ping(message="hello", telemetry={"intent": "ping server"}))
         self.assertEqual(result, {"message": "hello"})
-        self.assertEqual(batches[0]["events"][0]["metadata"]["tool_name"], "ping")
+        events = [event for batch in batches for event in batch["events"]]
+        tool_call = next(event for event in events if event["kind"] == "tool_call")
+        self.assertEqual(tool_call["metadata"]["tool_name"], "ping")
 
     def assert_fastmcp_import_path_registers_tool_with_telemetry_schema(self, import_path: str) -> None:
         try:

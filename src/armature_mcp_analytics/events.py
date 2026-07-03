@@ -71,6 +71,35 @@ def normalize_request_id(event_request_id: str | None = None) -> str:
     return event_request_id or str(uuid4())
 
 
+# Session identity for transports that have none: stdio servers never see an
+# `Mcp-Session-Id` and there is no HTTP request, so every event used to ship
+# `session_id_hint: None`. Armature's ingest groups null-hint events into a
+# coarse per-actor daily bucket, which merged distinct CLI conversations (e.g.
+# two `claude -p` runs on the same day) into a single activity.
+#
+# A stdio MCP server process is spawned by its client and serves exactly one
+# connection for its whole lifetime, so process identity IS session identity:
+# mint one id per process, lazily, and reuse it for every event that has no
+# other session signal. The recorder only falls back to this id for requests
+# that carry no HTTP headers at all — on an HTTP server many sessions share
+# one long-lived process, and pinning them all to a single id would be worse
+# than the server-side fallback bucketing.
+_process_session_id: str | None = None
+
+
+def process_scoped_session_id() -> str:
+    global _process_session_id
+    if _process_session_id is None:
+        _process_session_id = f"stdio-{uuid4()}"
+    return _process_session_id
+
+
+def _reset_process_scoped_session_id_for_tests() -> None:
+    # Test-only: lets one test process simulate several stdio server processes.
+    global _process_session_id
+    _process_session_id = None
+
+
 def _workflow_stamp(workflow_run_id: str | None) -> dict[str, Any]:
     return {"is_workflow": True, "workflow_run_id": workflow_run_id} if workflow_run_id else {}
 

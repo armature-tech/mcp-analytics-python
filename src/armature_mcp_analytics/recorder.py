@@ -15,10 +15,11 @@ from .events import (
     normalize_request_id,
     normalize_session_id,
     normalize_started_at,
+    process_scoped_session_id,
 )
 from .schema import append_telemetry_hint, decorate_input_schema_with_telemetry, extract_telemetry_arguments
 from .types import AnalyticsConfig, JsonDict, McpClientInfo, RequestExtra, TelemetryArgs, ToolRegistration
-from .utils import BoundedKeySet, derive_tool_result_error, workflow_run_id_from_headers
+from .utils import BoundedKeySet, derive_tool_result_error, header_value, workflow_run_id_from_headers
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -30,6 +31,32 @@ async def _maybe_await(value: Any) -> Any:
 def _headers_from_extra(extra: RequestExtra | None) -> Any:
     request_info = (extra or {}).get("requestInfo")
     return request_info.get("headers") if isinstance(request_info, dict) else None
+
+
+# Session id, in falling priority: explicit event/extra value, transport
+# `Mcp-Session-Id` header, then — only for requests with no HTTP headers at
+# all (stdio, in-process) — the process-scoped fallback. Stdio transports
+# never carry a session id, and events shipped with `session_id_hint: None`
+# get bucketed per-actor-per-day at ingest, merging distinct CLI conversations
+# into one activity (see `process_scoped_session_id`). Requests that DO carry
+# headers are excluded from the fallback: many sessions share a long-lived
+# HTTP server process, so the absence of a session id there must stay visible
+# to ingest instead of being glued to one process id.
+def _resolve_session_id(
+    session_id: str | None,
+    extra: RequestExtra | None,
+    headers: Any,
+) -> str | None:
+    normalized = normalize_session_id(session_id, extra)
+    if normalized:
+        return normalized
+    effective_headers = headers if headers is not None else _headers_from_extra(extra)
+    if effective_headers is None:
+        return process_scoped_session_id()
+    from_headers = header_value(effective_headers, "mcp-session-id")
+    if isinstance(from_headers, str) and from_headers.strip():
+        return from_headers.strip()
+    return None
 
 
 @dataclass
@@ -101,7 +128,7 @@ class AnalyticsRecorder:
         client_info: McpClientInfo | None = None,
         workflow_run_id: str | None = None,
     ) -> None:
-        normalized_session_id = normalize_session_id(session_id, extra)
+        normalized_session_id = _resolve_session_id(session_id, extra, headers)
         if not normalized_session_id:
             return
         actor_id = await self._actor_id_for(ctx=ctx, extra=extra, headers=headers, auth_info=auth_info)
@@ -149,7 +176,7 @@ class AnalyticsRecorder:
         finished_ms = time.time() * 1000
         started = normalize_started_at(started_at, duration_ms=duration_ms, finished_at_ms=finished_ms)
         finished = normalize_started_at(finished_ms)
-        normalized_session_id = normalize_session_id(session_id, extra)
+        normalized_session_id = _resolve_session_id(session_id, extra, headers)
         error_message = None if error is None else str(error)
         effective_workflow_run_id = self._workflow_run_id(workflow_run_id, headers, extra)
         event = build_tool_call_event(

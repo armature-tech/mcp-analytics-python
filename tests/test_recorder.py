@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import unittest
 
-from armature_mcp_analytics import create_analytics_recorder
+from armature_mcp_analytics import create_analytics_recorder, events
 
 
 class RecorderTests(unittest.TestCase):
@@ -65,7 +65,8 @@ class RecorderTests(unittest.TestCase):
 
         asyncio.run(run())
 
-        tool_call = batches[0]["events"][0]
+        events = [event for batch in batches for event in batch["events"]]
+        tool_call = next(event for event in events if event["kind"] == "tool_call")
         self.assertFalse(tool_call["ok"])
         self.assertEqual(tool_call["error"], "upstream 404")
 
@@ -106,7 +107,8 @@ class RecorderTests(unittest.TestCase):
 
         asyncio.run(run())
 
-        tool_call = batches[0]["events"][0]
+        events = [event for batch in batches for event in batch["events"]]
+        tool_call = next(event for event in events if event["kind"] == "tool_call")
         self.assertFalse(tool_call["ok"])
         self.assertEqual(tool_call["metadata"]["tool_name"], "cancelled_tool")
         self.assertEqual(tool_call["metadata"]["intent"], "stop work")
@@ -210,6 +212,144 @@ class RecorderTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "tool failed"):
             asyncio.run(run())
+
+
+class StdioSessionFallbackTests(unittest.TestCase):
+    """Regression suite for the "two `claude -p` conversations merged into one
+    Armature activity" bug. stdio transports never carry a session id and have
+    no HTTP headers, so every event went out with `session_id_hint: None` and
+    no `session_init` was ever emitted. Ingest groups null-hint events into a
+    per-actor DAILY bucket, so two distinct same-day CLI sessions from the same
+    user became indistinguishable. The fix: a stdio server process serves
+    exactly one connection, so the recorder falls back to a process-scoped
+    session id whenever a request carries no session signal and no headers."""
+
+    def setUp(self) -> None:
+        events._reset_process_scoped_session_id_for_tests()
+
+    def tearDown(self) -> None:
+        events._reset_process_scoped_session_id_for_tests()
+
+    def _recorder(self, batches: list) -> object:
+        return create_analytics_recorder(
+            {
+                "armature": {
+                    "delivery": "await",
+                    "actor_id": "same-cli-user",
+                    "emit": batches.append,
+                }
+            }
+        )
+
+    def test_stdio_processes_get_distinct_stable_session_ids(self) -> None:
+        # First `claude -p` run.
+        first_batches: list = []
+        first = self._recorder(first_batches)
+
+        async def run_first() -> None:
+            await first.record_tool_call(name="lookup_customer", status="ok", args={})
+            await first.record_tool_call(name="lookup_customer", status="ok", args={})
+
+        asyncio.run(run_first())
+
+        # Second run: a fresh process, simulated by resetting the singleton.
+        events._reset_process_scoped_session_id_for_tests()
+        second_batches: list = []
+        second = self._recorder(second_batches)
+
+        async def run_second() -> None:
+            await second.record_tool_call(name="lookup_customer", status="ok", args={})
+
+        asyncio.run(run_second())
+
+        first_events = [event for batch in first_batches for event in batch["events"]]
+        second_events = [event for batch in second_batches for event in batch["events"]]
+
+        # Before the fix every one of these hints was None — the exact payload
+        # observed in production — and ingest merged both runs into one bucket.
+        for event in first_events + second_events:
+            self.assertIsNotNone(event["session_id_hint"], f"{event['kind']} must carry a session id on stdio")
+
+        # Stable within one process, session_init emitted exactly once.
+        self.assertEqual(len({event["session_id_hint"] for event in first_events}), 1)
+        self.assertEqual(sum(1 for event in first_events if event["kind"] == "session_init"), 1)
+
+        # Distinct across processes: the runs can no longer collapse together.
+        self.assertNotEqual(first_events[0]["session_id_hint"], second_events[0]["session_id_hint"])
+
+    def test_http_shaped_requests_keep_null_hint_and_no_session_init(self) -> None:
+        batches: list = []
+        recorder = self._recorder(batches)
+
+        async def run() -> None:
+            # A stateless HTTP invocation that did not echo Mcp-Session-Id:
+            # headers exist, so the process-scoped fallback must NOT kick in —
+            # many sessions share one long-lived HTTP server process.
+            await recorder.record_tool_call(
+                name="lookup_customer",
+                status="ok",
+                args={},
+                extra={"requestInfo": {"headers": {"user-agent": "python-httpx"}}},
+            )
+
+        asyncio.run(run())
+
+        recorded = [event for batch in batches for event in batch["events"]]
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(recorded[0]["kind"], "tool_call")
+        self.assertIsNone(recorded[0]["session_id_hint"])
+
+    def test_headers_passed_directly_resolve_mcp_session_id_before_fallback(self) -> None:
+        batches: list = []
+        recorder = self._recorder(batches)
+
+        async def run() -> None:
+            await recorder.record_tool_call(
+                name="lookup_customer",
+                status="ok",
+                args={},
+                headers={"Mcp-Session-Id": "header-session-77"},
+            )
+
+        asyncio.run(run())
+
+        recorded = [event for batch in batches for event in batch["events"]]
+        tool_call = next(event for event in recorded if event["kind"] == "tool_call")
+        self.assertEqual(tool_call["session_id_hint"], "header-session-77")
+
+    def test_empty_headers_still_count_as_http_no_fallback(self) -> None:
+        batches: list = []
+        recorder = self._recorder(batches)
+
+        async def run() -> None:
+            # A pathological HTTP request whose headers were all stripped
+            # upstream: present-but-empty must NOT be conflated with "no HTTP
+            # request" or every session on the process would merge.
+            await recorder.record_tool_call(
+                name="lookup_customer", status="ok", args={}, headers={}
+            )
+
+        asyncio.run(run())
+
+        recorded = [event for batch in batches for event in batch["events"]]
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(recorded[0]["kind"], "tool_call")
+        self.assertIsNone(recorded[0]["session_id_hint"])
+
+    def test_explicit_session_id_wins_over_fallback(self) -> None:
+        batches: list = []
+        recorder = self._recorder(batches)
+
+        async def run() -> None:
+            await recorder.record_tool_call(
+                name="lookup_customer", status="ok", args={}, session_id="session-explicit"
+            )
+
+        asyncio.run(run())
+
+        recorded = [event for batch in batches for event in batch["events"]]
+        for event in recorded:
+            self.assertEqual(event["session_id_hint"], "session-explicit")
 
 
 if __name__ == "__main__":

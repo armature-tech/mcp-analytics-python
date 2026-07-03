@@ -95,6 +95,67 @@ def _headers_from_context(mapping: dict[str, Any]) -> Any:
     return None
 
 
+# Import-once cache for fastmcp's request-context accessors. The lookup runs
+# on every tool call; re-importing (or re-raising ImportError when fastmcp is
+# absent) per call would be needless overhead on hot paths.
+_FASTMCP_DEPS_UNSET = object()
+_fastmcp_deps: Any = _FASTMCP_DEPS_UNSET
+
+
+def _load_fastmcp_deps() -> Any:
+    global _fastmcp_deps
+    if _fastmcp_deps is _FASTMCP_DEPS_UNSET:
+        try:
+            from fastmcp.server.dependencies import get_http_headers, get_http_request
+
+            _fastmcp_deps = (get_http_headers, get_http_request)
+        except Exception:
+            _fastmcp_deps = None
+    return _fastmcp_deps
+
+
+def _http_headers_via_fastmcp() -> Any:
+    # FastMCP never hands tool functions the transport context, so on HTTP
+    # deployments pull the request headers from fastmcp's request-scoped
+    # accessor. Returns None over stdio (no active HTTP request) or when
+    # fastmcp is absent/too old. The recorder needs this distinction: requests
+    # with headers (even zero of them) keep their real (or absent) session id,
+    # while requests outside any HTTP context — stdio — fall back to the
+    # process-scoped session id.
+    deps = _load_fastmcp_deps()
+    if deps is None:
+        return None
+    get_http_headers, get_http_request = deps
+    # Presence of an HTTP request is the stdio/HTTP boundary — NOT header
+    # emptiness. A pathological HTTP client could send only headers that
+    # fastmcp's accessor strips, and coercing that empty dict to None would
+    # glue every session on the server process to one stdio fallback id.
+    try:
+        request = get_http_request()
+    except Exception:
+        # RuntimeError: no active HTTP request → stdio / in-process.
+        return None
+    # Today fastmcp signals "no HTTP context" by raising; guard the return
+    # value too in case a future version switches to returning None.
+    if request is None:
+        return None
+    try:
+        # `Mcp-Session-Id` is on fastmcp's default exclude list (it is meant
+        # for proxy forwarding, where re-sending it would be wrong), but it IS
+        # the session identity analytics needs — opt it back in.
+        try:
+            return get_http_headers(include={"mcp-session-id"})
+        except TypeError:
+            # fastmcp too old for `include`: header-bearing requests still
+            # stay out of the stdio fallback; sessionization falls back to
+            # server-side bucketing as before.
+            return get_http_headers()
+    except Exception:
+        # We KNOW an HTTP request is active; never degrade to the stdio
+        # fallback just because header extraction failed.
+        return {}
+
+
 def _context_from_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
     extra = kwargs.get("extra") or kwargs.get("ctx") or kwargs.get("context")
     context: dict[str, Any] = {}
@@ -120,6 +181,12 @@ def _context_from_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[st
         headers = _headers_from_context(source)
         if headers is not None:
             context["headers"] = headers
+    if "headers" not in context:
+        http_headers = _http_headers_via_fastmcp()
+        # `is not None`, deliberately: an empty dict still means "an HTTP
+        # request is active" and must keep the stdio fallback disarmed.
+        if http_headers is not None:
+            context["headers"] = http_headers
     return context
 
 
