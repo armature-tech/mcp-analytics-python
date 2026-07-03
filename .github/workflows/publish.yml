@@ -111,6 +111,7 @@ jobs:
           text = re.sub(r'^version = "[^"]+"$', f'version = "{next_version}"', text, count=1, flags=re.MULTILINE)
           pyproject_path.write_text(text)
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"package_name={package_name}\n")
               output.write(f"next_version={next_version}\n")
           print(f"Publishing {package_name}=={next_version}")
           PY
@@ -125,16 +126,17 @@ jobs:
 
       - name: Publish
         if: steps.existing_release.outputs.published != 'true'
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
 
       - name: Create GitHub release
         if: steps.existing_release.outputs.published != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          PACKAGE_NAME: ${{ steps.version.outputs.package_name }}
           NEXT_VERSION: ${{ steps.version.outputs.next_version }}
         run: |
           set -euo pipefail
           gh release create "v${NEXT_VERSION}" \
             --target "${GITHUB_SHA}" \
             --title "v${NEXT_VERSION}" \
-            --notes "Published armature-mcp-analytics==${NEXT_VERSION} from ${GITHUB_SHA}."
+            --notes "Published ${PACKAGE_NAME}==${NEXT_VERSION} from ${GITHUB_SHA}."

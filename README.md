@@ -189,7 +189,7 @@ CamelCase aliases are also accepted for JS parity:
 **Delivery mode.** `"background"` schedules delivery on the running event loop
 and returns the tool result immediately. Use it for long-lived processes and
 call `await analytics.recorder.flush()` at shutdown. `"await"` waits for the
-batch delivery attempt before returning and is the safer default for serverless
+batch delivery attempt before returning and is the safer choice for serverless
 or short-lived request handlers.
 
 **Actor id.** By default the SDK derives an actor seed from MCP `authInfo`
@@ -255,7 +255,10 @@ def ping(message: str) -> dict:
 
 
 async def main():
-    await ping(message="hello", telemetry={"intent": "verify analytics"})
+    await mcp.call_tool(
+        "ping",
+        {"message": "hello", "telemetry": {"intent": "verify analytics"}},
+    )
     await instrumentation.recorder.flush()
     assert batches[0]["events"][0]["kind"] == "tool_call"
     assert batches[0]["events"][0]["metadata"]["intent"] == "verify analytics"

@@ -224,7 +224,10 @@ def ping(message: str) -> dict:
 
 
 async def main():
-    await ping(message="hello", telemetry={"intent": "verify analytics"})
+    await mcp.call_tool(
+        "ping",
+        {"message": "hello", "telemetry": {"intent": "verify analytics"}},
+    )
     await instrumentation.recorder.flush()
     assert batches[0]["events"][0]["kind"] == "tool_call"
     assert batches[0]["events"][0]["metadata"]["tool_name"] == "ping"

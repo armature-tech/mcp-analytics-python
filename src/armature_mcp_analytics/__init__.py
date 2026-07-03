@@ -7,6 +7,7 @@ from .events import (
     build_tool_call_event,
     normalize_session_id,
 )
+from .emit import post_telemetry_event
 from .recorder import AnalyticsRecorder, create_analytics_recorder
 from .schema import (
     append_telemetry_hint,
@@ -42,6 +43,6 @@ __all__ = [
     "extract_telemetry_arguments",
     "instrument_fastmcp",
     "normalize_session_id",
+    "post_telemetry_event",
     "with_mcp_analytics",
 ]
-
