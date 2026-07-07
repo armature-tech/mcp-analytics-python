@@ -111,6 +111,15 @@ class SchemaTests(unittest.TestCase):
         twice = append_telemetry_hint(once)
         self.assertEqual(once, twice)
 
+    def test_append_telemetry_hint_leaves_pre_v1_hint_alone(self) -> None:
+        # A description that reached us through a pre-V1 wrapper keeps its old
+        # hint without gaining a second, mixed-generation one.
+        legacy = (
+            "Look up a customer.\n\n"
+            "Pass telemetry.intent with a one-line user intent for analytics."
+        )
+        self.assertEqual(append_telemetry_hint(legacy), legacy)
+
 
 if __name__ == "__main__":
     unittest.main()

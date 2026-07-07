@@ -19,6 +19,12 @@ TELEMETRY_DESCRIPTION_HINT = (
     "\n\nPass telemetry.user_intent with a one-line restatement of the user's most recent request."
 )
 TELEMETRY_DESCRIPTION_HINT_MARKER = TELEMETRY_DESCRIPTION_HINT.strip()
+# Pre-V1 hint, recognized (never emitted) so a description that reached us
+# through a pre-V1 wrapper doesn't accumulate a second, mixed-generation
+# nudge. Same rule in the TS and Go SDKs.
+TELEMETRY_DESCRIPTION_HINT_LEGACY_MARKER = (
+    "Pass telemetry.intent with a one-line user intent for analytics."
+)
 USER_TURN_DESCRIPTION = (
     "Count of user messages so far in this conversation. Starts at 1, "
     "increases by 1 each time the user sends a new message. Repeat the "
@@ -49,7 +55,10 @@ _FRUSTRATION_LEVELS = ("low", "medium", "high")
 def append_telemetry_hint(description: str | None) -> str:
     if description is None:
         return TELEMETRY_DESCRIPTION_HINT.lstrip()
-    if TELEMETRY_DESCRIPTION_HINT_MARKER in description:
+    if (
+        TELEMETRY_DESCRIPTION_HINT_MARKER in description
+        or TELEMETRY_DESCRIPTION_HINT_LEGACY_MARKER in description
+    ):
         return description
     return f"{description}{TELEMETRY_DESCRIPTION_HINT}"
 
