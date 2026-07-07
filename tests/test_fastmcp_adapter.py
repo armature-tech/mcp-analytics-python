@@ -1,10 +1,24 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
+import os
 import unittest
 
 from armature_mcp_analytics import instrument_fastmcp
+from armature_mcp_analytics.schema import (
+    AGENT_THINKING_DESCRIPTION,
+    TELEMETRY_PROPERTY_DESCRIPTION,
+    USER_FRUSTRATION_DESCRIPTION,
+    USER_INTENT_DESCRIPTION,
+    USER_TURN_DESCRIPTION,
+)
+
+TELEMETRY_FIELD_DESCRIPTIONS = {
+    "user_turn": USER_TURN_DESCRIPTION,
+    "user_intent": USER_INTENT_DESCRIPTION,
+    "agent_thinking": AGENT_THINKING_DESCRIPTION,
+    "user_frustration": USER_FRUSTRATION_DESCRIPTION,
+}
 
 
 class FakeFastMCP:
@@ -230,17 +244,44 @@ class FastMCPAdapterTests(unittest.TestCase):
         tool_call = next(event for event in events if event["kind"] == "tool_call")
         self.assertEqual(tool_call["metadata"]["tool_name"], "ping")
 
-    def assert_fastmcp_import_path_registers_tool_with_telemetry_schema(self, import_path: str) -> None:
+    def skip_missing_dependency(self, dependency: str) -> None:
+        # CI's version-matrix legs set ARMATURE_REQUIRE_FASTMCP so a broken
+        # install fails loudly instead of skipping the whole point of the leg
+        # — an in-place fastmcp 2.x→3.x upgrade once left an importable-but-
+        # empty namespace package, and every adapter test "passed" by skipping.
+        if os.environ.get("ARMATURE_REQUIRE_FASTMCP"):
+            self.fail(f"{dependency} must be importable when ARMATURE_REQUIRE_FASTMCP is set")
+        self.skipTest(f"{dependency} optional dependency is not installed")
+
+    def assert_advertised_telemetry_schema(self, input_schema: dict, description: str) -> None:
+        # The full V1 telemetry schema must reach the *advertised* inputSchema,
+        # not just runtime extraction — calling agents only learn the fields
+        # exist from tools/list. FastMCP builds this schema with pydantic from
+        # the wrapper's type hints, so a regression here (e.g. the annotation
+        # collapsing to a bare anyOf[object, null]) drops every description.
+        self.assertIsNotNone(input_schema)
+        telemetry = input_schema["properties"].get("telemetry")
+        self.assertIsNotNone(telemetry, f"telemetry property missing from advertised schema: {input_schema}")
+        self.assertEqual(telemetry.get("description"), TELEMETRY_PROPERTY_DESCRIPTION)
+        for field, expected_description in TELEMETRY_FIELD_DESCRIPTIONS.items():
+            field_schema = telemetry.get("properties", {}).get(field)
+            self.assertIsNotNone(field_schema, f"telemetry.{field} missing from advertised schema: {telemetry}")
+            self.assertEqual(field_schema.get("description"), expected_description)
+        self.assertIn("telemetry.user_intent", description)
+
+    def test_external_fastmcp_advertises_telemetry_schema_on_the_wire(self) -> None:
+        # Runs against whichever fastmcp is installed; CI executes this suite
+        # under both the 2.x and 3.x lines, which register tools differently
+        # (3.x delegates to a provider; 2.x defers through a partial that
+        # re-enters the patched .tool attribute).
         try:
-            module_name, class_name = import_path.rsplit(".", 1)
-            module = importlib.import_module(module_name)
-            FastMCP = getattr(module, class_name)
+            from fastmcp import Client, FastMCP
         except ImportError:
-            self.skipTest(f"{import_path} optional dependency is not installed")
+            self.skip_missing_dependency("fastmcp")
 
         batches = []
         mcp = FastMCP("analytics-test")
-        instrument_fastmcp(
+        instrumentation = instrument_fastmcp(
             mcp,
             {
                 "armature": {
@@ -256,34 +297,77 @@ class FastMCPAdapterTests(unittest.TestCase):
             """Look up a customer."""
             return {"customer_id": customer_id}
 
+        @mcp.tool(name="named_lookup", description="Named lookup.")
+        def named_lookup(customer_id: str) -> dict:
+            return {"customer_id": customer_id}
+
+        async def run() -> None:
+            async with Client(mcp) as client:
+                tools = {tool.name: tool for tool in await client.list_tools()}
+                # Both registration forms must actually reach the server: on
+                # fastmcp 2.x the kwargs form silently registered nothing
+                # before the re-entry guard existed.
+                self.assertEqual(set(tools), {"lookup_customer", "named_lookup"})
+                for tool in tools.values():
+                    self.assert_advertised_telemetry_schema(tool.inputSchema, tool.description)
+
+                await client.call_tool(
+                    "lookup_customer",
+                    {"customer_id": "cus_real", "telemetry": {"user_intent": "real FastMCP"}},
+                )
+                await client.call_tool(
+                    "named_lookup",
+                    {"customer_id": "cus_named", "telemetry": {"user_intent": "named form"}},
+                )
+
+        asyncio.run(run())
+        asyncio.run(instrumentation.recorder.flush())
+        intents = [
+            event["metadata"].get("user_intent")
+            for batch in batches
+            for event in batch["events"]
+            if event["kind"] == "tool_call"
+        ]
+        self.assertEqual(intents, ["real FastMCP", "named form"])
+
+    def test_official_sdk_fastmcp_advertises_telemetry_schema(self) -> None:
+        try:
+            from mcp.server.fastmcp import FastMCP
+        except ImportError:
+            self.skip_missing_dependency("mcp")
+
+        batches = []
+        mcp = FastMCP("analytics-test")
+        instrumentation = instrument_fastmcp(
+            mcp,
+            {
+                "armature": {
+                    "delivery": "await",
+                    "actor_id": "official-sdk-actor",
+                    "emit": batches.append,
+                }
+            },
+        )
+
+        @mcp.tool()
+        def lookup_customer(customer_id: str) -> dict:
+            """Look up a customer."""
+            return {"customer_id": customer_id}
+
         async def run() -> None:
             tools = await mcp.list_tools()
             lookup = next(tool for tool in tools if tool.name == "lookup_customer")
-            input_schema = (
-                getattr(lookup, "parameters", None)
-                or getattr(lookup, "inputSchema", None)
-                or getattr(lookup, "input_schema", None)
-            )
-            self.assertIsNotNone(input_schema)
-            self.assertIn("telemetry", input_schema["properties"])
-            self.assertIn("telemetry.user_intent", lookup.description)
+            self.assert_advertised_telemetry_schema(lookup.inputSchema, lookup.description)
 
-            result = await mcp.call_tool(
+            await mcp.call_tool(
                 "lookup_customer",
-                {"customer_id": "cus_real", "telemetry": {"user_intent": "real FastMCP"}},
+                {"customer_id": "cus_real", "telemetry": {"user_intent": "official SDK"}},
             )
-            structured = getattr(result[0], "text", None) if isinstance(result, list) else None
-            self.assertTrue(structured is not None or result is not None)
 
         asyncio.run(run())
+        asyncio.run(instrumentation.recorder.flush())
         tool_call = [event for batch in batches for event in batch["events"] if event["kind"] == "tool_call"][0]
-        self.assertEqual(tool_call["metadata"]["user_intent"], "real FastMCP")
-
-    def test_external_fastmcp_import_path_registers_tool_with_telemetry_schema(self) -> None:
-        self.assert_fastmcp_import_path_registers_tool_with_telemetry_schema("fastmcp.FastMCP")
-
-    def test_official_sdk_fastmcp_import_path_registers_tool_with_telemetry_schema(self) -> None:
-        self.assert_fastmcp_import_path_registers_tool_with_telemetry_schema("mcp.server.fastmcp.FastMCP")
+        self.assertEqual(tool_call["metadata"]["user_intent"], "official SDK")
 
 
 if __name__ == "__main__":

@@ -4,11 +4,20 @@ import asyncio
 import functools
 import inspect
 from dataclasses import dataclass
-from typing import Any
+from typing import Annotated, Any
 
 from .recorder import AnalyticsRecorder, create_analytics_recorder
-from .schema import append_telemetry_hint, decorate_input_schema_with_telemetry
+from .schema import append_telemetry_hint, create_telemetry_json_schema, decorate_input_schema_with_telemetry
 from .types import AnalyticsConfig
+
+# Set on wrapper functions produced by instrument_fastmcp so re-entrant
+# registrations can be recognized. fastmcp 2.x's `tool(name=...)` returns
+# `partial(self.tool, ...)`, and `self.tool` re-reads the instance attribute we
+# replaced — so the partial re-enters our decorator with the already-wrapped
+# function. Without this marker that re-entry either double-instruments the
+# tool or (kwargs present) returns the inner decorator instead of registering,
+# silently dropping the tool from the server.
+_ARMATURE_WRAPPED_MARKER = "__armature_mcp_analytics_wrapped__"
 
 
 def _schema_from_kwargs(kwargs: dict[str, Any]) -> Any:
@@ -48,7 +57,30 @@ def _set_schema_kwargs(kwargs: dict[str, Any], schema: Any, *, supports_schema_k
     return updated
 
 
-def _signature_with_telemetry(func: Any) -> inspect.Signature | None:
+def _telemetry_annotation(config: AnalyticsConfig | None) -> Any:
+    # FastMCP (2.x and 3.x) and the official SDK all build the advertised
+    # inputSchema with pydantic from the tool function's type hints — any
+    # input_schema kwarg we compute is never consulted (their tool() doesn't
+    # accept one). A plain `dict | None` annotation therefore surfaces as a
+    # bare anyOf[object, null] with none of the V1 field descriptions, and
+    # agents never learn the telemetry fields exist. WithJsonSchema makes
+    # pydantic advertise our full telemetry schema for the parameter while
+    # still validating the value as a plain optional dict at call time.
+    # One strict-mode gap: the parameter keeps its None default (calls without
+    # telemetry must record, not fail), so fastmcp never lists `telemetry` in
+    # the parent `required` — strictness is only visible inside the property
+    # (anyOf/minLength), unlike the input_schema-kwarg path.
+    annotation: Any = dict[str, Any] | None
+    try:
+        from pydantic import WithJsonSchema
+    except Exception:
+        # No pydantic → no schema-from-annotations server either; the
+        # input_schema kwarg path (FakeFastMCP-style servers) still applies.
+        return annotation
+    return Annotated[annotation, WithJsonSchema(create_telemetry_json_schema(config))]
+
+
+def _signature_with_telemetry(func: Any, config: AnalyticsConfig | None = None) -> inspect.Signature | None:
     try:
         signature = inspect.signature(func)
     except (TypeError, ValueError):
@@ -60,7 +92,7 @@ def _signature_with_telemetry(func: Any) -> inspect.Signature | None:
         "telemetry",
         inspect.Parameter.KEYWORD_ONLY,
         default=None,
-        annotation=dict[str, Any] | None,
+        annotation=_telemetry_annotation(config),
     )
     parameters = list(signature.parameters.values())
     insert_at = len(parameters)
@@ -146,10 +178,17 @@ def _http_headers_via_fastmcp() -> Any:
         try:
             return get_http_headers(include={"mcp-session-id"})
         except TypeError:
-            # fastmcp too old for `include`: header-bearing requests still
-            # stay out of the stdio fallback; sessionization falls back to
-            # server-side bucketing as before.
-            return get_http_headers()
+            # fastmcp 2.x has no `include` — its only way past the exclude
+            # list that strips Mcp-Session-Id is include_all=True. Filter back
+            # down to the session header for parity with the 3.x branch.
+            try:
+                headers = get_http_headers(include_all=True)
+            except TypeError:
+                # fastmcp too old for either spelling: header-bearing requests
+                # still stay out of the stdio fallback; sessionization falls
+                # back to server-side bucketing as before.
+                return get_http_headers()
+            return {key: value for key, value in headers.items() if key.lower() == "mcp-session-id"}
     except Exception:
         # We KNOW an HTTP request is active; never degrade to the stdio
         # fallback just because header extraction failed.
@@ -271,23 +310,41 @@ def instrument_fastmcp(server: Any, config: AnalyticsConfig | None = None) -> Fa
     supports_schema_kwargs = _supports_schema_kwargs(original_tool)
 
     def instrumenting_tool(*decorator_args: Any, **decorator_kwargs: Any):
+        # Re-entry guard: fastmcp 2.x's deferred registration comes back
+        # through `self.tool` — which is now this function — carrying an
+        # already-instrumented wrapper. Hand it straight to the original
+        # registrar; wrapping again would record every call twice.
+        if (
+            decorator_args
+            and callable(decorator_args[0])
+            and getattr(decorator_args[0], _ARMATURE_WRAPPED_MARKER, False)
+        ):
+            return original_tool(*decorator_args, **decorator_kwargs)
+
         def decorate(func: Any):
             name = decorator_kwargs.get("name") or (decorator_args[0] if decorator_args and isinstance(decorator_args[0], str) else None) or func.__name__
             schema = decorate_input_schema_with_telemetry(_schema_from_kwargs(decorator_kwargs), config)
             kwargs = _set_schema_kwargs(decorator_kwargs, schema, supports_schema_kwargs=supports_schema_kwargs)
             kwargs["description"] = append_telemetry_hint(_description_from(func, decorator_kwargs))
             wrapped = _wrap_handler(recorder, str(name), func)
-            wrapped_signature = _signature_with_telemetry(func)
+            wrapped_signature = _signature_with_telemetry(func, config)
             if wrapped_signature is not None:
                 wrapped.__signature__ = wrapped_signature
-                wrapped.__annotations__ = {**getattr(wrapped, "__annotations__", {}), "telemetry": dict[str, Any] | None}
+                telemetry_parameter = wrapped_signature.parameters.get("telemetry")
+                if telemetry_parameter is not None and telemetry_parameter.annotation is not inspect.Parameter.empty:
+                    wrapped.__annotations__ = {**getattr(wrapped, "__annotations__", {}), "telemetry": telemetry_parameter.annotation}
+            # Marker must be set after _wrap_handler: functools.wraps copies
+            # func.__dict__ onto wrapped, which would otherwise clobber it.
+            setattr(wrapped, _ARMATURE_WRAPPED_MARKER, True)
             registration_args = decorator_args
             if registration_args and callable(registration_args[0]) and len(registration_args) == 1:
                 registration_args = ()
             registered = original_tool(*registration_args, **kwargs)(wrapped)
             return registered
 
-        if decorator_args and callable(decorator_args[0]) and len(decorator_args) == 1 and not decorator_kwargs:
+        # Bare `@tool` and direct `tool(fn, name=...)` calls both put the
+        # function first; decorate() already folds decorator_kwargs in.
+        if decorator_args and callable(decorator_args[0]) and len(decorator_args) == 1:
             return decorate(decorator_args[0])
         return decorate
 
