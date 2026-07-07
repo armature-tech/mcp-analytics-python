@@ -10,7 +10,16 @@ DeliveryMode = Literal["background", "await"]
 ToolStatus = Literal["ok", "error"]
 
 
+# V1 telemetry field names. The pre-V1 spellings remain accepted on input
+# (clients holding a cached pre-V1 tool schema, callers passing telemetry
+# straight into record_tool_call) and are normalized onto the V1 names by
+# normalize_telemetry_args before any event is built.
 class TelemetryArgs(TypedDict, total=False):
+    user_turn: int
+    user_intent: str
+    agent_thinking: str
+    user_frustration: str
+    # Deprecated pre-V1 spellings; still accepted.
     intent: str
     context: str
     frustration_level: str

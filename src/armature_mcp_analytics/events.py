@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from .schema import normalize_telemetry_args
 from .types import AnalyticsIngestBatch, AnalyticsIngestEvent, McpClientInfo, RequestExtra, TelemetryArgs
 from .utils import (
     BoundedKeySet,
@@ -137,6 +138,7 @@ def build_tool_call_event(
     result_truncated = False
     if output is not None:
         result_preview, result_truncated = truncate_utf8(stringify_preview(output), MAX_PREVIEW_BYTES)
+    t = normalize_telemetry_args(telemetry) or {}
 
     return {
         **_workflow_stamp(workflow_run_id),
@@ -151,9 +153,15 @@ def build_tool_call_event(
         "error": error_message,
         "metadata": {
             "tool_name": tool_name,
-            "intent": (telemetry or {}).get("intent"),
-            "context": (telemetry or {}).get("context"),
-            "frustration_level": (telemetry or {}).get("frustration_level"),
+            "user_turn": t.get("user_turn"),
+            "user_intent": t.get("user_intent"),
+            "agent_thinking": t.get("agent_thinking"),
+            "user_frustration": t.get("user_frustration"),
+            # Legacy mirrors (pre-V1 key names) so an ingest that hasn't picked
+            # up the V1 schema keeps reading events from this SDK.
+            "intent": t.get("user_intent"),
+            "context": t.get("agent_thinking"),
+            "frustration_level": t.get("user_frustration"),
             "input_preview": input_preview,
         },
         "script_source": source,

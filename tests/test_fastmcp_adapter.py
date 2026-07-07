@@ -45,14 +45,14 @@ class FastMCPAdapterTests(unittest.TestCase):
         registered = mcp.tools["lookup_customer"]
         schema = registered["kwargs"]["input_schema"]
         self.assertIn("telemetry", schema["properties"])
-        self.assertIn("telemetry.intent", registered["kwargs"]["description"])
+        self.assertIn("telemetry.user_intent", registered["kwargs"]["description"])
 
-        result = asyncio.run(lookup_customer(customer_id="cus_123", telemetry={"intent": "find customer"}))
+        result = asyncio.run(lookup_customer(customer_id="cus_123", telemetry={"user_intent": "find customer"}))
         self.assertEqual(result, {"customer_id": "cus_123"})
 
         asyncio.run(instrumentation.recorder.flush())
         tool_call = [event for batch in batches for event in batch["events"] if event["kind"] == "tool_call"][0]
-        self.assertEqual(tool_call["metadata"]["intent"], "find customer")
+        self.assertEqual(tool_call["metadata"]["user_intent"], "find customer")
 
     def test_sync_tool_can_run_inside_event_loop(self) -> None:
         batches = []
@@ -73,13 +73,13 @@ class FastMCPAdapterTests(unittest.TestCase):
             return {"customer_id": customer_id}
 
         async def call_from_loop() -> dict:
-            return await sync_lookup(customer_id="cus_loop", telemetry={"intent": "call sync in event loop"})
+            return await sync_lookup(customer_id="cus_loop", telemetry={"user_intent": "call sync in event loop"})
 
         result = asyncio.run(call_from_loop())
 
         self.assertEqual(result, {"customer_id": "cus_loop"})
         tool_call = [event for batch in batches for event in batch["events"] if event["kind"] == "tool_call"][0]
-        self.assertEqual(tool_call["metadata"]["intent"], "call sync in event loop")
+        self.assertEqual(tool_call["metadata"]["user_intent"], "call sync in event loop")
 
     def test_omitted_optional_parameters_do_not_shift_later_arguments(self) -> None:
         mcp = FakeFastMCP()
@@ -98,7 +98,7 @@ class FastMCPAdapterTests(unittest.TestCase):
         def optional_lookup(first: str = "default-first", second: str = "default-second") -> dict:
             return {"first": first, "second": second}
 
-        result = asyncio.run(optional_lookup(second="provided", telemetry={"intent": "test binding"}))
+        result = asyncio.run(optional_lookup(second="provided", telemetry={"user_intent": "test binding"}))
 
         self.assertEqual(result, {"first": "default-first", "second": "provided"})
 
@@ -123,7 +123,7 @@ class FastMCPAdapterTests(unittest.TestCase):
             strict_lookup(
                 customer_id="cus_unknown",
                 unexpected_field="ignored",
-                telemetry={"intent": "ignore unknown field"},
+                telemetry={"user_intent": "ignore unknown field"},
             )
         )
 
@@ -224,7 +224,7 @@ class FastMCPAdapterTests(unittest.TestCase):
         async def ping(message: str) -> dict:
             return {"message": message}
 
-        result = asyncio.run(ping(message="hello", telemetry={"intent": "ping server"}))
+        result = asyncio.run(ping(message="hello", telemetry={"user_intent": "ping server"}))
         self.assertEqual(result, {"message": "hello"})
         events = [event for batch in batches for event in batch["events"]]
         tool_call = next(event for event in events if event["kind"] == "tool_call")
@@ -266,18 +266,18 @@ class FastMCPAdapterTests(unittest.TestCase):
             )
             self.assertIsNotNone(input_schema)
             self.assertIn("telemetry", input_schema["properties"])
-            self.assertIn("telemetry.intent", lookup.description)
+            self.assertIn("telemetry.user_intent", lookup.description)
 
             result = await mcp.call_tool(
                 "lookup_customer",
-                {"customer_id": "cus_real", "telemetry": {"intent": "real FastMCP"}},
+                {"customer_id": "cus_real", "telemetry": {"user_intent": "real FastMCP"}},
             )
             structured = getattr(result[0], "text", None) if isinstance(result, list) else None
             self.assertTrue(structured is not None or result is not None)
 
         asyncio.run(run())
         tool_call = [event for batch in batches for event in batch["events"] if event["kind"] == "tool_call"][0]
-        self.assertEqual(tool_call["metadata"]["intent"], "real FastMCP")
+        self.assertEqual(tool_call["metadata"]["user_intent"], "real FastMCP")
 
     def test_external_fastmcp_import_path_registers_tool_with_telemetry_schema(self) -> None:
         self.assert_fastmcp_import_path_registers_tool_with_telemetry_schema("fastmcp.FastMCP")

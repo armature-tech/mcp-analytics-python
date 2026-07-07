@@ -13,7 +13,7 @@ description: >
 
 You are integrating the `armature-mcp-analytics` SDK into a customer's Python
 MCP server. The SDK decorates each tool's input schema with an optional
-`telemetry` block (`intent`, `context`, `frustration_level`), strips that block
+`telemetry` block (`user_turn`, `user_intent`, `agent_thinking`, `user_frustration`), strips that block
 before the handler runs, and posts an authenticated batch to Armature after each
 call.
 
@@ -191,7 +191,7 @@ Two checks. Do not skip them.
 
 **Check 1: schema includes telemetry.** Start the server or call its tool
 listing helper. Confirm at least one tool's input schema contains a
-`telemetry` property and the tool description mentions `telemetry.intent`.
+`telemetry` property and the tool description mentions `telemetry.user_intent`.
 
 **Check 2: a real tool call produces a batch.** Set `armature.emit` to a stub,
 invoke a tool with telemetry, and assert the captured batch has a `tool_call`
@@ -226,12 +226,12 @@ def ping(message: str) -> dict:
 async def main():
     await mcp.call_tool(
         "ping",
-        {"message": "hello", "telemetry": {"intent": "verify analytics"}},
+        {"message": "hello", "telemetry": {"user_intent": "verify analytics"}},
     )
     await instrumentation.recorder.flush()
     assert batches[0]["events"][0]["kind"] == "tool_call"
     assert batches[0]["events"][0]["metadata"]["tool_name"] == "ping"
-    assert batches[0]["events"][0]["metadata"]["intent"] == "verify analytics"
+    assert batches[0]["events"][0]["metadata"]["user_intent"] == "verify analytics"
 
 
 asyncio.run(main())

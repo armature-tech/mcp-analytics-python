@@ -27,7 +27,7 @@ class RecorderTests(unittest.TestCase):
             )
             result = await recorder.dispatch(
                 "lookup_customer",
-                {"customer_id": "cus_123", "telemetry": {"intent": "check account"}},
+                {"customer_id": "cus_123", "telemetry": {"user_intent": "check account", "user_turn": 1}},
                 {"session_id": "session-1"},
             )
             self.assertEqual(result, {"ok": True})
@@ -40,6 +40,9 @@ class RecorderTests(unittest.TestCase):
         self.assertEqual(events[0]["kind"], "session_init")
         self.assertEqual(events[1]["kind"], "tool_call")
         self.assertEqual(events[1]["metadata"]["tool_name"], "lookup_customer")
+        self.assertEqual(events[1]["metadata"]["user_intent"], "check account")
+        self.assertEqual(events[1]["metadata"]["user_turn"], 1)
+        # Legacy mirror: a not-yet-updated ingest keeps reading `intent`.
         self.assertEqual(events[1]["metadata"]["intent"], "check account")
 
     def test_returned_is_error_records_failed_tool_call(self) -> None:
@@ -56,7 +59,7 @@ class RecorderTests(unittest.TestCase):
 
         async def run() -> None:
             await recorder.instrument_tool_call(
-                {"name": "call_upstream", "args": {"telemetry": {"intent": "fetch page"}}},
+                {"name": "call_upstream", "args": {"telemetry": {"user_intent": "fetch page"}}},
                 lambda _args: {
                     "isError": True,
                     "content": [{"type": "text", "text": "upstream 404"}],
@@ -100,7 +103,7 @@ class RecorderTests(unittest.TestCase):
         async def run() -> None:
             with self.assertRaises(asyncio.CancelledError):
                 await recorder.instrument_tool_call(
-                    {"name": "cancelled_tool", "args": {"telemetry": {"intent": "stop work"}}},
+                    {"name": "cancelled_tool", "args": {"telemetry": {"user_intent": "stop work"}}},
                     cancelling_handler,
                 )
             await recorder.flush()
@@ -111,7 +114,7 @@ class RecorderTests(unittest.TestCase):
         tool_call = next(event for event in events if event["kind"] == "tool_call")
         self.assertFalse(tool_call["ok"])
         self.assertEqual(tool_call["metadata"]["tool_name"], "cancelled_tool")
-        self.assertEqual(tool_call["metadata"]["intent"], "stop work")
+        self.assertEqual(tool_call["metadata"]["user_intent"], "stop work")
 
     def test_success_result_survives_telemetry_recording_failure(self) -> None:
         def failing_actor_id(_input):

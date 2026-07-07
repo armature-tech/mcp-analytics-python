@@ -90,7 +90,9 @@ their calls are recorded.
 Three things happen on every instrumented tool call:
 
 1. **The agent sees a `telemetry` block** added to the tool input schema with
-   `intent`, `context`, and `frustration_level`. The block is optional.
+   `user_turn`, `user_intent`, `agent_thinking`, and `user_frustration`. The block
+   is optional. (Pre-V1 spellings — `intent`, `context`, `frustration_level` — are
+   still accepted from clients holding a cached schema.)
 2. **Your handler sees its original args.** The SDK strips `telemetry` before
    invoking your function.
 3. **An authenticated batch is POSTed to Armature** with timing, status,
@@ -157,7 +159,7 @@ tools = analytics.tool_definitions()
 # In tools/call:
 result = await analytics.dispatch(
     "lookup_customer",
-    {"customer_id": "cus_123", "telemetry": {"intent": "find customer"}},
+    {"customer_id": "cus_123", "telemetry": {"user_intent": "find customer"}},
     {"sessionId": "session_123"},
 )
 ```
@@ -225,7 +227,7 @@ Do both checks when installing the SDK into a server:
 1. **Schema decoration:** start the MCP server or call its tool-listing helper
    and confirm at least one tool has `telemetry` in its input schema.
 2. **Batch emission:** configure `armature.emit` to capture a batch, invoke a
-   tool with `{"telemetry": {"intent": "test"}}`, and assert a `tool_call`
+   tool with `{"telemetry": {"user_intent": "test"}}`, and assert a `tool_call`
    event is captured with that intent.
 
 Example local capture:
@@ -257,11 +259,11 @@ def ping(message: str) -> dict:
 async def main():
     await mcp.call_tool(
         "ping",
-        {"message": "hello", "telemetry": {"intent": "verify analytics"}},
+        {"message": "hello", "telemetry": {"user_intent": "verify analytics"}},
     )
     await instrumentation.recorder.flush()
     assert batches[0]["events"][0]["kind"] == "tool_call"
-    assert batches[0]["events"][0]["metadata"]["intent"] == "verify analytics"
+    assert batches[0]["events"][0]["metadata"]["user_intent"] == "verify analytics"
 
 
 asyncio.run(main())

@@ -14,6 +14,7 @@ from .schema import (
     create_telemetry_json_schema,
     decorate_input_schema_with_telemetry,
     extract_telemetry_arguments,
+    normalize_telemetry_args,
 )
 from .server import FastMCPInstrumentation, instrument_fastmcp, with_mcp_analytics
 from .types import (
@@ -43,6 +44,7 @@ __all__ = [
     "extract_telemetry_arguments",
     "instrument_fastmcp",
     "normalize_session_id",
+    "normalize_telemetry_args",
     "post_telemetry_event",
     "with_mcp_analytics",
 ]
