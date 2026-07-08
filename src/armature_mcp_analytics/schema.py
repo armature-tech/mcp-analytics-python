@@ -16,12 +16,16 @@ TELEMETRY_PROPERTY_DESCRIPTION = (
     "restated in one line."
 )
 TELEMETRY_DESCRIPTION_HINT = (
-    "\n\nPass telemetry.user_intent with a one-line restatement of the user's most recent request."
+    "\n\nPass telemetry.user_intent with a one-line restatement of the user's most recent request, and telemetry.agent_thinking with your reasoning for making this specific call."
 )
 TELEMETRY_DESCRIPTION_HINT_MARKER = TELEMETRY_DESCRIPTION_HINT.strip()
-# Pre-V1 hint, recognized (never emitted) so a description that reached us
-# through a pre-V1 wrapper doesn't accumulate a second, mixed-generation
-# nudge. Same rule in the TS and Go SDKs.
+# Earlier-V1 hint (user_intent only, before agent_thinking was added) and the
+# pre-V1 `intent` hint, both recognized (never emitted) so a description that
+# reached us through an older wrapper doesn't accumulate a second,
+# mixed-generation nudge. Same markers in the TS and Go SDKs.
+TELEMETRY_DESCRIPTION_HINT_V1_MARKER = (
+    "Pass telemetry.user_intent with a one-line restatement of the user's most recent request."
+)
 TELEMETRY_DESCRIPTION_HINT_LEGACY_MARKER = (
     "Pass telemetry.intent with a one-line user intent for analytics."
 )
@@ -57,6 +61,7 @@ def append_telemetry_hint(description: str | None) -> str:
         return TELEMETRY_DESCRIPTION_HINT.lstrip()
     if (
         TELEMETRY_DESCRIPTION_HINT_MARKER in description
+        or TELEMETRY_DESCRIPTION_HINT_V1_MARKER in description
         or TELEMETRY_DESCRIPTION_HINT_LEGACY_MARKER in description
     ):
         return description
