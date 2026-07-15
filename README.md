@@ -7,7 +7,7 @@ Understand which MCP tools agents use, what users are trying to accomplish, and 
 [![CI](https://github.com/armature-tech/mcp-analytics-python/actions/workflows/ci.yml/badge.svg)](https://github.com/armature-tech/mcp-analytics-python/actions/workflows/ci.yml)
 [![Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-[Dashboard](https://app.armature.tech) · [TypeScript SDK](https://github.com/armature-tech/mcp-analytics) · [Go SDK](https://github.com/armature-tech/mcp-analytics-go) · [Agent install](SKILL.md)
+[Armature](https://armature.tech) · [TypeScript SDK](https://github.com/armature-tech/mcp-analytics) · [Go SDK](https://github.com/armature-tech/mcp-analytics-go) · [Agent install](SKILL.md)
 
 ## Install in 30 seconds
 
