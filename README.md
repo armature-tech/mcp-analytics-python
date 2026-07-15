@@ -1,139 +1,138 @@
-# armature-mcp-analytics
+# Armature MCP Analytics for Python
 
-[Armature](https://armature.tech) analytics for Python MCP servers. Drop in
-the FastMCP wrapper, keep writing normal tools, and get Armature events for who
-called each tool, what the agent was trying to do, and where calls failed.
+Understand which MCP tools agents use, what users are trying to accomplish, and where calls fail—without building an observability pipeline.
 
-The Python SDK is FastMCP-first and supports both common import paths:
+[![PyPI version](https://img.shields.io/pypi/v/armature-mcp-analytics?label=PyPI)](https://pypi.org/project/armature-mcp-analytics/)
+[![Python versions](https://img.shields.io/pypi/pyversions/armature-mcp-analytics)](https://pypi.org/project/armature-mcp-analytics/)
+[![CI](https://github.com/armature-tech/mcp-analytics-python/actions/workflows/ci.yml/badge.svg)](https://github.com/armature-tech/mcp-analytics-python/actions/workflows/ci.yml)
+[![Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-- `from fastmcp import FastMCP`
-- `from mcp.server.fastmcp import FastMCP`
+[Dashboard](https://app.armature.tech) · [TypeScript SDK](https://github.com/armature-tech/mcp-analytics) · [Go SDK](https://github.com/armature-tech/mcp-analytics-go) · [Agent install](SKILL.md)
 
-It also exposes lower-level recorder and dispatcher primitives for custom MCP
-servers.
+## Install in 30 seconds
 
-## Getting Started
+### 1. Install
 
-**Cloud:** sign in at [app.armature.tech](https://app.armature.tech), create a
-server, and copy the ingest API key.
+For servers using the standalone FastMCP package:
 
-**Install the SDK** in your MCP server environment:
-
-```bash
+~~~bash
 pip install "armature-mcp-analytics[fastmcp]"
-```
+~~~
 
-Use the `mcp` extra instead if your server imports FastMCP from the official MCP
-Python SDK:
+If FastMCP comes from the official MCP Python SDK:
 
-```bash
+~~~bash
 pip install "armature-mcp-analytics[mcp]"
-```
+~~~
 
-Install both extras when a repo supports either import path:
+### 2. Add your ingest key
 
-```bash
-pip install "armature-mcp-analytics[fastmcp,mcp]"
-```
+Create a server in the [Armature dashboard](https://app.armature.tech), copy its ingest key, and add it to your environment:
 
-**Wrap your FastMCP server before registering tools:**
+~~~bash
+export ANALYTICS_INGEST_API_KEY="..."
+~~~
 
-```python
-import os
+### 3. Instrument FastMCP
+
+Call **instrument_fastmcp** before registering your tools:
+
+~~~python
 from fastmcp import FastMCP
 from armature_mcp_analytics import instrument_fastmcp
 
 mcp = FastMCP("Customer MCP")
 
-analytics = instrument_fastmcp(
+instrument_fastmcp(
     mcp,
-    {
-        "armature": {
-            # endpoint_url / api_key default to env vars
-            "api_key": os.getenv("ANALYTICS_INGEST_API_KEY"),
-            "delivery": "await",
-        }
-    },
+    {"armature": {"delivery": "await"}},
 )
 
 
 @mcp.tool
 def lookup_customer(customer_id: str) -> dict:
-    """Look up a customer by id."""
-    return {"customer_id": customer_id, "status": "active"}
+    return {
+        "customer_id": customer_id,
+        "status": "active",
+    }
 
 
-if __name__ == "__main__":
-    mcp.run()
-```
+mcp.run()
+~~~
 
-The same wrapper works with the SDK-integrated FastMCP:
+> **That’s it. Make one tool call, open Armature, and the session is already there.**
 
-```python
+## Built for MCP—not page views
+
+| Understand demand | Find what breaks | Improve with context |
+| --- | --- | --- |
+| See which tools and use cases people actually need. | Surface failures, retries, latency, and dead ends. | Connect every call to user intent and agent reasoning. |
+
+No custom event schema. No logging pipeline. No changes to your tool handlers.
+
+## What you see in Armature
+
+- Complete MCP sessions and client attribution
+- The user intent behind each session
+- Every tool called by the agent
+- Input and output previews, latency, and outcome
+- Failures, timeouts, and repeated retries
+- Cross-server activity for the same actor
+
+## How it works
+
+Armature instruments the boundary around every tool call:
+
+1. The SDK adds an optional **telemetry** block to the tool’s input schema.
+2. The agent can attach user intent, reasoning, and frustration to the call.
+3. The SDK removes telemetry before your handler receives the arguments.
+4. Timing, outcome, and truncated previews are sent to your dashboard.
+
+~~~json
+{
+  "telemetry": {
+    "user_turn": 1,
+    "user_intent": "Check whether the customer's last payment succeeded",
+    "agent_thinking": "The payment lookup tool provides the requested status",
+    "user_frustration": "low"
+  }
+}
+~~~
+
+All telemetry fields are optional. The earlier **intent**, **context**, and **frustration_level** names remain accepted for clients with cached schemas.
+
+> **Privacy:** Armature is observability, not authentication. Keep your existing MCP authentication and authorization in place. Do not put secrets in tool arguments or telemetry fields.
+
+## Supported Python MCP servers
+
+| Your server | Install | Integration |
+| --- | --- | --- |
+| **from fastmcp import FastMCP** | **armature-mcp-analytics[fastmcp]** | **instrument_fastmcp(...)** |
+| **from mcp.server.fastmcp import FastMCP** | **armature-mcp-analytics[mcp]** | **instrument_fastmcp(...)** |
+| Custom dispatcher | Base package | **create_analytics_recorder(...)** |
+
+The FastMCP wrapper is idempotent. Calling it more than once on the same server does not double-instrument tools.
+
+### Official MCP Python SDK
+
+~~~python
 from mcp.server.fastmcp import FastMCP
 from armature_mcp_analytics import instrument_fastmcp
 
 mcp = FastMCP("Customer MCP")
 instrument_fastmcp(mcp, {"armature": {"delivery": "await"}})
-```
+~~~
 
-That's it. Tools registered after `instrument_fastmcp(...)` are decorated and
-their calls are recorded.
+### Custom dispatcher
 
-> Want an agent to wire this into a repo? Point it at
-> [`SKILL.md`](SKILL.md). The playbook tells it how to detect the FastMCP import
-> path, where to place the wrapper, and how to verify that telemetry is really
-> emitted.
+Use the recorder when you manage **tools/list** and **tools/call** yourself:
 
-## How It Works
-
-Three things happen on every instrumented tool call:
-
-1. **The agent sees a `telemetry` block** added to the tool input schema with
-   `user_turn`, `user_intent`, `agent_thinking`, and `user_frustration`. The block
-   is optional. (Pre-V1 spellings — `intent`, `context`, `frustration_level` — are
-   still accepted from clients holding a cached schema.)
-2. **Your handler sees its original args.** The SDK strips `telemetry` before
-   invoking your function.
-3. **An authenticated batch is POSTed to Armature** with timing, status,
-   input/output previews, and whatever telemetry the agent supplied. The first
-   call for a session id also emits `session_init`.
-
-Telemetry is observability, not auth. Keep your existing MCP auth/authorization
-checks in place.
-
-## Integration Shapes
-
-### FastMCP decorator
-
-Use `instrument_fastmcp(mcp, config)` for servers that use `@mcp.tool` or
-`@mcp.tool(...)`. Instrument the server before the tool decorators run:
-
-```python
-from fastmcp import FastMCP
-from armature_mcp_analytics import instrument_fastmcp
-
-mcp = FastMCP("Orders MCP")
-instrument_fastmcp(mcp, {"armature": {"delivery": "await"}})
-
-
-@mcp.tool(name="lookup_order")
-async def lookup_order(order_id: str) -> dict:
-    return {"order_id": order_id}
-```
-
-`instrument_fastmcp` is idempotent. Calling it twice on the same server returns
-the existing instrumentation instead of double-wrapping tools.
-
-### Lower-level recorder / dispatcher
-
-For custom JSON-RPC dispatchers or servers that do not use FastMCP decorators,
-use `create_analytics_recorder()`:
-
-```python
+~~~python
 from armature_mcp_analytics import create_analytics_recorder
 
-analytics = create_analytics_recorder({"armature": {"delivery": "await"}})
+analytics = create_analytics_recorder(
+    {"armature": {"delivery": "await"}}
+)
 
 
 async def lookup_customer(args, context):
@@ -143,102 +142,118 @@ async def lookup_customer(args, context):
 analytics.tool(
     {
         "name": "lookup_customer",
-        "description": "Look up a customer by id.",
+        "description": "Look up a customer by ID.",
         "inputSchema": {
             "type": "object",
-            "properties": {"customer_id": {"type": "string"}},
+            "properties": {
+                "customer_id": {"type": "string"},
+            },
             "required": ["customer_id"],
         },
     },
     lookup_customer,
 )
 
-# In tools/list:
+# tools/list
 tools = analytics.tool_definitions()
 
-# In tools/call:
+# tools/call
 result = await analytics.dispatch(
     "lookup_customer",
-    {"customer_id": "cus_123", "telemetry": {"user_intent": "find customer"}},
+    {
+        "customer_id": "cus_123",
+        "telemetry": {
+            "user_intent": "Find the customer",
+        },
+    },
     {"sessionId": "session_123"},
 )
-```
+~~~
 
-Pass the MCP session id, request id, headers, auth info, and client info in the
-dispatch context when your server has them. That improves session grouping,
-actor attribution, and client attribution in Armature.
+Pass stable session, client, request, header, and authentication information in the dispatcher context when it is available.
+
+## Let your coding agent install it
+
+Point Claude Code, Cursor, or Codex at [SKILL.md](SKILL.md), then ask:
+
+> Install Armature MCP Analytics using the repository’s SKILL.md. Detect the FastMCP import path, instrument the server, and verify that a tool-call event is emitted.
+
+The playbook covers both FastMCP import paths and custom dispatchers.
 
 ## Configuration
 
-```python
-config = {
-    "armature": {
-        "endpoint_url": "https://app.armature.tech/api/mcp-analytics/ingest",
-        "api_key": "...",
-        "actor_id": "stable-user-or-tenant-seed",
-        "enabled": True,
-        "delivery": "await",  # "background" or "await"
-        "timeout_ms": 500,
-        "emit": None,         # optional test/custom emitter
-        "on_error": None,     # optional delivery error hook
-    }
-}
-```
+Most servers only need **ANALYTICS_INGEST_API_KEY**. Operational controls are available when you need them:
 
-CamelCase aliases are also accepted for JS parity:
-`endpointUrl`, `apiKey`, `actorId`, `timeoutMs`, and `onError`.
+~~~python
+instrumentation = instrument_fastmcp(
+    mcp,
+    {
+        "armature": {
+            "endpoint_url": "https://app.armature.tech/api/mcp-analytics/ingest",
+            "api_key": "...",
+            "actor_id": "stable-user-or-tenant-seed",
+            "enabled": True,
+            "delivery": "await",
+            "timeout_ms": 500,
+            "emit": None,
+            "on_error": None,
+        }
+    },
+)
+~~~
 
-**Delivery mode.** `"background"` schedules delivery on the running event loop
-and returns the tool result immediately. Use it for long-lived processes and
-call `await analytics.recorder.flush()` at shutdown. `"await"` waits for the
-batch delivery attempt before returning and is the safer choice for serverless
-or short-lived request handlers.
+| Option | Default | Purpose |
+| --- | --- | --- |
+| **endpoint_url** | Armature cloud | Override the ingestion endpoint |
+| **api_key** | **ANALYTICS_INGEST_API_KEY** | Authenticate events and identify the MCP server |
+| **actor_id** | Derived from request auth | Supply a stable user or tenant seed |
+| **enabled** | **True** | Enable or disable instrumentation |
+| **delivery** | **"background"** | Use **"await"** for serverless or short-lived processes |
+| **timeout_ms** | **500** | Set the delivery timeout |
+| **emit** | Network emitter | Replace delivery for tests or custom pipelines |
+| **on_error** | None | Observe delivery failures |
 
-**Actor id.** By default the SDK derives an actor seed from MCP `authInfo`
-(`token`, `clientId`, `apiKey`, or `principalId`), then the `Authorization`
-header, then `"anonymous"`. Pass `armature.actor_id` as a string or function to
-control the seed:
+CamelCase aliases such as **endpointUrl**, **apiKey**, **actorId**, **timeoutMs**, and **onError** are accepted for JavaScript parity.
 
-```python
-def actor_id(input):
-    return input.get("authInfo", {}).get("principalId", "anonymous")
+### Delivery
+
+- **"background"** schedules delivery on the running event loop. Call **await instrumentation.recorder.flush()** during shutdown.
+- **"await"** waits for the delivery attempt before returning. Use it for serverless functions and short-lived processes.
+
+If the API key is missing, delivery quietly no-ops for local development.
+
+### Actor identification
+
+By default, the SDK derives an actor seed from MCP authentication information or the Authorization header. You can provide a string or function through **actor_id**:
+
+~~~python
+def actor_id(context):
+    return context.get("authInfo", {}).get("principalId", "anonymous")
 
 
-instrument_fastmcp(mcp, {"armature": {"actor_id": actor_id}})
-```
+instrument_fastmcp(
+    mcp,
+    {"armature": {"actor_id": actor_id}},
+)
+~~~
 
-**Missing API key.** If no API key is configured, delivery silently no-ops. This
-is intentional for local development.
+The seed is hashed before transmission. Armature scopes the resulting actor identifier to your server.
 
-**Auth.** Each batch is POSTed with `Authorization: Bearer <api_key>`. Server
-identity is resolved from the API key.
+## Verify your integration
 
-## Environment Variables
+A successful import is not enough. Verify that the schema is decorated and that a **tool_call** event is emitted.
 
-| Variable | Purpose |
-| --- | --- |
-| `ANALYTICS_INGEST_API_KEY` | Armature ingest API key. Missing keys no-op for local development. |
-| `ANALYTICS_INGEST_URL` | Optional ingest endpoint override. Defaults to `https://app.armature.tech/api/mcp-analytics/ingest`. |
+Replace network delivery with a local capture:
 
-## Verification
-
-Do both checks when installing the SDK into a server:
-
-1. **Schema decoration:** start the MCP server or call its tool-listing helper
-   and confirm at least one tool has `telemetry` in its input schema.
-2. **Batch emission:** configure `armature.emit` to capture a batch, invoke a
-   tool with `{"telemetry": {"user_intent": "test"}}`, and assert a `tool_call`
-   event is captured with that intent.
-
-Example local capture:
-
-```python
+~~~python
 import asyncio
+
 from fastmcp import FastMCP
 from armature_mcp_analytics import instrument_fastmcp
 
 batches = []
 mcp = FastMCP("Analytics smoke test")
+
 instrumentation = instrument_fastmcp(
     mcp,
     {
@@ -259,37 +274,45 @@ def ping(message: str) -> dict:
 async def main():
     await mcp.call_tool(
         "ping",
-        {"message": "hello", "telemetry": {"user_intent": "verify analytics"}},
+        {
+            "message": "hello",
+            "telemetry": {
+                "user_intent": "Verify analytics",
+            },
+        },
     )
     await instrumentation.recorder.flush()
-    assert batches[0]["events"][0]["kind"] == "tool_call"
-    assert batches[0]["events"][0]["metadata"]["user_intent"] == "verify analytics"
+
+    event = next(
+        event
+        for batch in batches
+        for event in batch["events"]
+        if event["kind"] == "tool_call"
+    )
+    assert event["metadata"]["user_intent"] == "Verify analytics"
 
 
 asyncio.run(main())
-```
+~~~
 
-A passing import or type check is not enough; verify both schema decoration and
-batch emission.
+## Compatibility
 
-## Python vs. JavaScript SDK
+- Python 3.10+
+- FastMCP 2.x and 3.x
+- Official MCP Python SDK 1.27+
+- Synchronous and asynchronous tool handlers
 
-The Python SDK covers the most common Python MCP framework path today:
-FastMCP, including both the standalone `fastmcp` package and the official MCP
-SDK import path. It also includes recorder/dispatcher primitives for custom
-servers.
+## Environment variables
 
-The JavaScript SDK currently has additional adapters for JS-specific shapes,
-including Mastra and stateless HTTP helpers. Those do not apply directly to
-Python. If your Python server has a custom stateless HTTP transport, pass stable
-`sessionId`, `clientInfo`, headers, and auth info into the recorder/dispatcher
-context yourself so Armature can group sessions correctly.
+| Variable | Purpose |
+| --- | --- |
+| **ANALYTICS_INGEST_API_KEY** | Armature ingest key |
+| **ANALYTICS_INGEST_URL** | Optional ingestion endpoint override |
 
-## More
+## Support
 
-- **Official MCP SDK support:** install with `pip install "armature-mcp-analytics[mcp]"`
-  and use `from mcp.server.fastmcp import FastMCP`.
-- **Custom integrations:** use `create_analytics_recorder`,
-  `decorate_input_schema_with_telemetry`, and `extract_telemetry_arguments` for
-  non-FastMCP servers.
-- **Support:** `hey@armature.tech` or open an issue.
+[Open an issue](https://github.com/armature-tech/mcp-analytics-python/issues) · [Email us](mailto:hey@armature.tech) · [Releases](https://github.com/armature-tech/mcp-analytics-python/releases)
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).
