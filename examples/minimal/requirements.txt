@@ -1,0 +1,1 @@
+armature-mcp-analytics[fastmcp]>=0.1.9

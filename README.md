@@ -309,6 +309,18 @@ asyncio.run(main())
 | **ANALYTICS_INGEST_API_KEY** | Armature ingest key |
 | **ANALYTICS_INGEST_URL** | Optional ingestion endpoint override |
 
+## Example
+
+Run the complete stdio server in [examples/minimal](examples/minimal):
+
+~~~bash
+cd examples/minimal
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+ANALYTICS_INGEST_API_KEY="..." python server.py
+~~~
+
 ## Support
 
 [Open an issue](https://github.com/armature-tech/mcp-analytics-python/issues) · [Email us](mailto:hey@armature.tech) · [Releases](https://github.com/armature-tech/mcp-analytics-python/releases)
