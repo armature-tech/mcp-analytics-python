@@ -18,6 +18,7 @@ from .events import (
     process_scoped_session_id,
 )
 from .schema import append_telemetry_hint, decorate_input_schema_with_telemetry, extract_telemetry_arguments
+from .stateless_http import parse_stateless_session_client_info
 from .types import AnalyticsConfig, JsonDict, McpClientInfo, RequestExtra, TelemetryArgs, ToolRegistration
 from .utils import BoundedKeySet, derive_tool_result_error, header_value, workflow_run_id_from_headers
 
@@ -129,6 +130,8 @@ class AnalyticsRecorder:
         workflow_run_id: str | None = None,
     ) -> None:
         normalized_session_id = _resolve_session_id(session_id, extra, headers)
+        if client_info is None:
+            client_info = parse_stateless_session_client_info(normalized_session_id)
         if not normalized_session_id:
             return
         actor_id = await self._actor_id_for(ctx=ctx, extra=extra, headers=headers, auth_info=auth_info)
@@ -177,6 +180,8 @@ class AnalyticsRecorder:
         started = normalize_started_at(started_at, duration_ms=duration_ms, finished_at_ms=finished_ms)
         finished = normalize_started_at(finished_ms)
         normalized_session_id = _resolve_session_id(session_id, extra, headers)
+        if client_info is None:
+            client_info = parse_stateless_session_client_info(normalized_session_id)
         error_message = None if error is None else str(error)
         effective_workflow_run_id = self._workflow_run_id(workflow_run_id, headers, extra)
         event = build_tool_call_event(

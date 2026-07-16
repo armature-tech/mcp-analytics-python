@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, Literal, TypedDict
 
-
 JsonDict = dict[str, Any]
 Headers = Mapping[str, str | list[str] | tuple[str, ...] | None]
 DeliveryMode = Literal["background", "await"]
@@ -72,7 +71,7 @@ class AnalyticsConfig(TypedDict, total=False):
     telemetry: JsonDict
 
 
-class AnalyticsIngestEvent(TypedDict):
+class _RequiredAnalyticsIngestEvent(TypedDict):
     event_id: str
     kind: Literal["tool_call", "session_init"]
     actor_id: str
@@ -90,6 +89,11 @@ class AnalyticsIngestEvent(TypedDict):
     calls: list[Any]
     logs: list[Any]
     search_calls: list[Any]
+
+
+class AnalyticsIngestEvent(_RequiredAnalyticsIngestEvent, total=False):
+    is_workflow: bool
+    workflow_run_id: str
 
 
 class AnalyticsIngestBatch(TypedDict):

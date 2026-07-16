@@ -1,5 +1,6 @@
 """Armature analytics helpers for Python MCP servers."""
 
+from .emit import post_telemetry_event
 from .events import (
     build_actor_id,
     build_event_id,
@@ -7,7 +8,6 @@ from .events import (
     build_tool_call_event,
     normalize_session_id,
 )
-from .emit import post_telemetry_event
 from .recorder import AnalyticsRecorder, create_analytics_recorder
 from .schema import (
     append_telemetry_hint,
@@ -17,6 +17,13 @@ from .schema import (
     normalize_telemetry_args,
 )
 from .server import FastMCPInstrumentation, instrument_fastmcp, with_mcp_analytics
+from .stateless_http import (
+    StatelessHttpSession,
+    StatelessHttpSessionMiddleware,
+    build_stateless_session_id,
+    parse_stateless_session_client_info,
+    resolve_stateless_http_session,
+)
 from .types import (
     AnalyticsConfig,
     AnalyticsIngestBatch,
@@ -32,11 +39,14 @@ __all__ = [
     "AnalyticsRecorder",
     "FastMCPInstrumentation",
     "McpClientInfo",
+    "StatelessHttpSession",
+    "StatelessHttpSessionMiddleware",
     "TelemetryArgs",
     "append_telemetry_hint",
     "build_actor_id",
     "build_event_id",
     "build_session_init_event",
+    "build_stateless_session_id",
     "build_tool_call_event",
     "create_analytics_recorder",
     "create_telemetry_json_schema",
@@ -46,5 +56,7 @@ __all__ = [
     "normalize_session_id",
     "normalize_telemetry_args",
     "post_telemetry_event",
+    "parse_stateless_session_client_info",
+    "resolve_stateless_http_session",
     "with_mcp_analytics",
 ]

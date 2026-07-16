@@ -91,6 +91,25 @@ Use this table:
 If you are not sure, choose `"await"`. It is the safer integration default and
 only waits for the telemetry delivery attempt.
 
+### Stateless HTTP / serverless sessions
+
+For FastMCP apps deployed without sticky sessions, wrap the ASGI app with
+`StatelessHttpSessionMiddleware`:
+
+```python
+from armature_mcp_analytics import StatelessHttpSessionMiddleware
+
+app = StatelessHttpSessionMiddleware(
+    mcp.http_app(stateless_http=True, json_response=True)
+)
+```
+
+For `mcp.server.fastmcp.FastMCP`, construct it with `stateless_http=True` and
+wrap `mcp.streamable_http_app()`. The middleware issues an identity-bearing
+`Mcp-Session-Id` on initialize and recovers that session/client on later cold
+requests. Do not deploy stateless HTTP without it; otherwise one conversation
+can fragment into one Armature session per call.
+
 ## Step 5: Make the edits
 
 ### Shape A/B: FastMCP

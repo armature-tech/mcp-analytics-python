@@ -110,6 +110,7 @@ All telemetry fields are optional. The earlier **intent**, **context**, and **fr
 | **from fastmcp import FastMCP** | **armature-mcp-analytics[fastmcp]** | **instrument_fastmcp(...)** |
 | **from mcp.server.fastmcp import FastMCP** | **armature-mcp-analytics[mcp]** | **instrument_fastmcp(...)** |
 | Custom dispatcher | Base package | **create_analytics_recorder(...)** |
+| Stateless HTTP / serverless | Base package | **StatelessHttpSessionMiddleware(...)** |
 
 The FastMCP wrapper is idempotent. Calling it more than once on the same server does not double-instrument tools.
 
@@ -171,6 +172,43 @@ result = await analytics.dispatch(
 ~~~
 
 Pass stable session, client, request, header, and authentication information in the dispatcher context when it is available.
+
+### Stateless HTTP and serverless
+
+Initialization and tool calls can land on different instances. Wrap a
+stateless FastMCP ASGI app so `initialize` issues an identity-bearing session
+ID that later requests echo:
+
+~~~python
+from armature_mcp_analytics import StatelessHttpSessionMiddleware
+
+# Standalone FastMCP
+app = StatelessHttpSessionMiddleware(
+    mcp.http_app(stateless_http=True, json_response=True)
+)
+
+# Official MCP Python SDK FastMCP
+# mcp = FastMCP("Customer MCP", stateless_http=True, json_response=True)
+# app = StatelessHttpSessionMiddleware(mcp.streamable_http_app())
+~~~
+
+The middleware is dependency-free ASGI. It mints
+`mcp_<client>_v_<version>_<uuid>` on a successful initialize response and
+preserves the echoed `Mcp-Session-Id` on later cold invocations. The recorder
+then recovers the client identity without a session store. Continue to use
+`delivery: "await"` in request-scoped deployments.
+
+Custom transports can use the lower-level API directly:
+
+~~~python
+from armature_mcp_analytics import resolve_stateless_http_session
+
+session = resolve_stateless_http_session(body=request_body, headers=request_headers)
+generator = session.session_id_generator  # initialize only
+context = session.dispatch_context         # recorder/dispatcher context
+~~~
+
+Session IDs provide observability attribution, not authentication.
 
 ## Let your coding agent install it
 
