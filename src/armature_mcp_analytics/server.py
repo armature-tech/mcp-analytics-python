@@ -73,10 +73,8 @@ def _telemetry_annotation(config: AnalyticsConfig | None) -> Any:
     # agents never learn the telemetry fields exist. WithJsonSchema makes
     # pydantic advertise our full telemetry schema for the parameter while
     # still validating the value as a plain optional dict at call time.
-    # One strict-mode gap: the parameter keeps its None default (calls without
-    # telemetry must record, not fail), so fastmcp never lists `telemetry` in
-    # the parent `required` — strictness is only visible inside the property
-    # (anyOf/minLength), unlike the input_schema-kwarg path.
+    # The parameter keeps its None default because sparse telemetry is always
+    # optional; user_intent is omitted after the first call in a user turn.
     annotation: Any = dict[str, Any] | None
     try:
         from pydantic import WithJsonSchema

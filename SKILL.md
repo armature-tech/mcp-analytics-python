@@ -13,7 +13,7 @@ description: >
 
 You are integrating the `armature-mcp-analytics` SDK into a customer's Python
 MCP server. The SDK decorates each tool's input schema with an optional
-`telemetry` block (`user_turn`, `user_intent`, `agent_thinking`, `user_frustration`), strips that block
+`telemetry` block (`user_intent`, `agent_thinking`, `user_frustration`), strips that block
 before the handler runs, and posts an authenticated batch to Armature after each
 call.
 

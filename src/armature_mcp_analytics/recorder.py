@@ -19,7 +19,6 @@ from .events import (
 )
 from .schema import (
     apply_telemetry_field_map,
-    assert_telemetry_capture_consistent,
     extract_telemetry_arguments,
     is_capture_enabled,
     plan_tool_telemetry,
@@ -84,7 +83,6 @@ class _RegisteredTool:
 class AnalyticsRecorder:
     def __init__(self, config: AnalyticsConfig | None = None) -> None:
         self.config = config or {}
-        assert_telemetry_capture_consistent(self.config)
         self._emitter = create_flushable_emitter(self.config)
         self._session_init_keys = BoundedKeySet(10_000)
         self._tools: dict[str, _RegisteredTool] = {}

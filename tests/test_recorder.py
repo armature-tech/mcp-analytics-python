@@ -69,7 +69,7 @@ class RecorderTests(unittest.TestCase):
         self.assertEqual(events[1]["kind"], "tool_call")
         self.assertEqual(events[1]["metadata"]["tool_name"], "lookup_customer")
         self.assertEqual(events[1]["metadata"]["user_intent"], "check account")
-        self.assertEqual(events[1]["metadata"]["user_turn"], 1)
+        self.assertNotIn("user_turn", events[1]["metadata"])
         # Legacy mirror: a not-yet-updated ingest keeps reading `intent`.
         self.assertEqual(events[1]["metadata"]["intent"], "check account")
 

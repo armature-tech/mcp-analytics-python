@@ -64,14 +64,13 @@ class CapturePlanTest(unittest.TestCase):
         self.assertIs(plan.input_schema, owned)
         self.assertEqual(plan.apply_description("Mine."), "Mine.")
 
-    def test_strict_with_capture_off_fails_fast(self) -> None:
-        with self.assertRaisesRegex(ValueError, "capture_telemetry is False"):
-            create_analytics_recorder(
-                {
-                    "armature": {"capture_telemetry": False},
-                    "telemetry": {"user_intent": "required"},
-                }
-            )
+    def test_legacy_strict_config_is_ignored_with_capture_off(self) -> None:
+        create_analytics_recorder(
+            {
+                "armature": {"capture_telemetry": False},
+                "telemetry": {"user_intent": "required"},
+            }
+        )
 
 
 class CaptureRecorderTest(unittest.TestCase):
@@ -96,7 +95,8 @@ class CaptureRecorderTest(unittest.TestCase):
             result={"ok": True},
         )
         event = next(e for e in batch["events"] if e["kind"] == "tool_call")
-        for key in ("user_intent", "agent_thinking", "user_frustration", "user_turn", "intent", "context"):
+        self.assertNotIn("user_turn", event["metadata"])
+        for key in ("user_intent", "agent_thinking", "user_frustration", "intent", "context"):
             self.assertIsNone(event["metadata"][key], key)
 
     def test_direct_record_for_registered_owned_tool_drops_telemetry(self) -> None:
@@ -167,10 +167,9 @@ class SyncWrapperOwnershipTest(unittest.TestCase):
 
 
 class FieldMapTest(unittest.TestCase):
-    def test_integral_float_turn_matches_normalizer_contract(self) -> None:
-        self.assertEqual(
-            apply_telemetry_field_map(None, {"turn": 2.0}, {"user_turn": "turn"}),
-            {"user_turn": 2},
+    def test_cached_user_turn_field_map_is_ignored(self) -> None:
+        self.assertIsNone(
+            apply_telemetry_field_map(None, {"turn": 2.0}, {"user_turn": "turn"})
         )
 
     def test_explicit_telemetry_wins_and_types_validated(self) -> None:
@@ -180,7 +179,7 @@ class FieldMapTest(unittest.TestCase):
                 {"purpose": "mapped", "turn": 2, "mood": "high"},
                 {"user_intent": "purpose", "user_turn": "turn", "user_frustration": "mood"},
             ),
-            {"user_intent": "explicit", "user_turn": 2, "user_frustration": "high"},
+            {"user_intent": "explicit", "user_frustration": "high"},
         )
         self.assertIsNone(
             apply_telemetry_field_map(

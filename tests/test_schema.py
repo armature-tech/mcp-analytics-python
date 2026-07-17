@@ -24,38 +24,30 @@ class SchemaTests(unittest.TestCase):
         self.assertIn("telemetry", decorated["properties"])
         self.assertNotIn("required", decorated["properties"]["telemetry"])
         telemetry_props = decorated["properties"]["telemetry"]["properties"]
-        self.assertEqual(telemetry_props["user_turn"]["type"], "integer")
+        self.assertNotIn("user_turn", telemetry_props)
         self.assertEqual(telemetry_props["user_intent"]["type"], "string")
         self.assertEqual(telemetry_props["agent_thinking"]["type"], "string")
         self.assertEqual(telemetry_props["user_frustration"]["type"], "string")
 
-    def test_required_telemetry_mode_is_internal_but_supported(self) -> None:
+    def test_legacy_required_telemetry_mode_is_ignored(self) -> None:
         decorated = decorate_input_schema_with_telemetry(
             {"type": "object", "properties": {}, "required": []},
             {"telemetry": {"user_intent": "required"}},
         )
 
-        self.assertEqual(decorated["required"], ["telemetry"])
+        self.assertEqual(decorated["required"], [])
         telemetry = decorated["properties"]["telemetry"]
-        # user_intent required, satisfiable via the legacy `intent` spelling so
-        # strict validators don't reject cached pre-V1 clients.
-        self.assertEqual(
-            telemetry["anyOf"],
-            [{"required": ["user_intent"]}, {"required": ["intent"]}],
-        )
+        self.assertNotIn("anyOf", telemetry)
         self.assertNotIn("required", telemetry)
 
-    def test_pre_v1_strict_config_key_still_enables_strict_mode(self) -> None:
+    def test_pre_v1_strict_config_key_is_also_ignored(self) -> None:
         decorated = decorate_input_schema_with_telemetry(
             {"type": "object", "properties": {}, "required": []},
             {"telemetry": {"intent": "required"}},
         )
 
-        self.assertEqual(decorated["required"], ["telemetry"])
-        self.assertEqual(
-            decorated["properties"]["telemetry"]["anyOf"],
-            [{"required": ["user_intent"]}, {"required": ["intent"]}],
-        )
+        self.assertEqual(decorated["required"], [])
+        self.assertNotIn("anyOf", decorated["properties"]["telemetry"])
 
     def test_extract_telemetry_strips_handler_args(self) -> None:
         args, telemetry = extract_telemetry_arguments(
@@ -90,21 +82,16 @@ class SchemaTests(unittest.TestCase):
             },
         )
 
-    def test_extract_telemetry_keeps_only_one_based_integral_user_turn(self) -> None:
-        # Fractional, zero, and negative turn counts are dropped rather than
-        # coerced, so a bad value never attaches calls to a wrong or
-        # nonexistent turn; integral floats (2.0, as some JSON stacks produce)
-        # are accepted. Booleans are never turns.
-        for bad in (1.9, 0, -1, True):
+    def test_extract_telemetry_ignores_cached_user_turn(self) -> None:
+        for cached in (1.9, 0, -1, True, 2.0):
             _, telemetry = extract_telemetry_arguments(
-                {"telemetry": {"user_intent": "check account", "user_turn": bad}}
+                {"telemetry": {"user_intent": "check account", "user_turn": cached}}
             )
-            self.assertEqual(telemetry, {"user_intent": "check account"}, f"user_turn={bad!r}")
-
-        _, integral = extract_telemetry_arguments(
-            {"telemetry": {"user_intent": "check account", "user_turn": 2.0}}
-        )
-        self.assertEqual(integral, {"user_intent": "check account", "user_turn": 2})
+            self.assertEqual(
+                telemetry,
+                {"user_intent": "check account"},
+                f"user_turn={cached!r}",
+            )
 
     def test_append_telemetry_hint_is_idempotent(self) -> None:
         once = append_telemetry_hint("Look up a customer.")
@@ -120,6 +107,14 @@ class SchemaTests(unittest.TestCase):
             "restatement of the user's most recent request."
         )
         self.assertEqual(append_telemetry_hint(v1_hinted), v1_hinted)
+        repeated_intent_hinted = (
+            "Look up a customer.\n\nPass telemetry.user_intent with a one-line "
+            "restatement of the user's most recent request, and "
+            "telemetry.agent_thinking with your reasoning for making this specific call."
+        )
+        self.assertEqual(
+            append_telemetry_hint(repeated_intent_hinted), repeated_intent_hinted
+        )
         legacy_hinted = (
             "Look up a customer.\n\nPass telemetry.intent with a one-line user "
             "intent for analytics."

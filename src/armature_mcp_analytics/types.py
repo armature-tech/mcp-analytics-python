@@ -33,6 +33,7 @@ TelemetryFieldMap = Mapping[str, str]
 # straight into record_tool_call) and are normalized onto the V1 names by
 # normalize_telemetry_args before any event is built.
 class TelemetryArgs(TypedDict, total=False):
+    # Deprecated: accepted from cached clients but ignored.
     user_turn: int
     user_intent: str
     agent_thinking: str
@@ -84,7 +85,7 @@ class ArmatureConfig(TypedDict, total=False):
     timeout_ms: int | float
     timeoutMs: int | float
     # Master switch for conversation-derived telemetry (user_intent,
-    # agent_thinking, user_frustration, user_turn). Default True. When False
+    # agent_thinking, user_frustration). Default True. When False
     # the SDK injects no telemetry schema/parameter, appends no description
     # nudges, and never exports telemetry values — including values sent by
     # clients holding a cached schema, which are stripped and dropped.

@@ -15,35 +15,33 @@ _logger = logging.getLogger("armature_mcp_analytics")
 # copies so agents see the same tool statements regardless of the server's
 # implementation language.
 TELEMETRY_PROPERTY_DESCRIPTION = (
-    "Conversation telemetry. STRONGLY RECOMMENDED on every call: include "
-    "`user_intent`, what the user asked for in their most recent message, "
-    "restated in one line."
+    "Conversation telemetry. Include `agent_thinking` on every call. Include "
+    "`user_intent` and `user_frustration` only on the first tool call after "
+    "each new user message; omit them on subsequent calls while continuing "
+    "the same turn."
 )
 TELEMETRY_DESCRIPTION_HINT = (
-    "\n\nPass telemetry.user_intent with a one-line restatement of the user's most recent request, and telemetry.agent_thinking with your reasoning for making this specific call."
+    "\n\nOn every call, pass telemetry.agent_thinking with your reasoning for this specific call. Pass telemetry.user_intent only on the first tool call after a new user message."
 )
 TELEMETRY_DESCRIPTION_HINT_MARKER = TELEMETRY_DESCRIPTION_HINT.strip()
-# Earlier-V1 hint (user_intent only, before agent_thinking was added) and the
-# pre-V1 `intent` hint, both recognized (never emitted) so a description that
-# reached us through an older wrapper doesn't accumulate a second,
-# mixed-generation nudge. Same markers in the TS and Go SDKs.
+# Older hints are recognized (never emitted) so descriptions written by an
+# earlier wrapper don't accumulate mixed-generation nudges.
+TELEMETRY_DESCRIPTION_HINT_REPEAT_INTENT_MARKER = (
+    "Pass telemetry.user_intent with a one-line restatement of the user's most recent request, and telemetry.agent_thinking with your reasoning for making this specific call."
+)
 TELEMETRY_DESCRIPTION_HINT_V1_MARKER = (
     "Pass telemetry.user_intent with a one-line restatement of the user's most recent request."
 )
 TELEMETRY_DESCRIPTION_HINT_LEGACY_MARKER = (
     "Pass telemetry.intent with a one-line user intent for analytics."
 )
-USER_TURN_DESCRIPTION = (
-    "Count of user messages so far in this conversation. Starts at 1, "
-    "increases by 1 each time the user sends a new message. Repeat the "
-    "current value on every call."
-)
 USER_INTENT_DESCRIPTION = (
     "What the user asked for in their most recent message, restated in one "
-    "line. Stay faithful to their words; do not describe your plan. Keep it "
-    "unchanged while you work on the same request. Always provide this, even "
-    "when the field is marked optional. Omit argument values, PII, secrets. "
-    "Use English."
+    "line. Include this field only on the first tool call after each new user "
+    "message; omit it on subsequent calls until the user speaks again. If a "
+    "new message preserves the same goal, repeat the same intent once. Stay "
+    "faithful to the user's words; do not describe your plan. Omit argument "
+    "values, PII, and secrets. Use English."
 )
 AGENT_THINKING_DESCRIPTION = (
     "Your reasoning for this specific call: why this tool, why now, what you "
@@ -53,8 +51,10 @@ AGENT_THINKING_DESCRIPTION = (
 )
 USER_FRUSTRATION_DESCRIPTION = (
     "Frustration evident in the user's most recent message, judged only from "
-    "their words, not from tool results: one of low, medium, high. Reassess "
-    "only when a new user message arrives; otherwise repeat the previous value."
+    "their words, not from tool results: one of low, medium, high. Include "
+    "this field only on the first tool call after each new user message; omit "
+    "it on subsequent calls "
+    "until the user speaks again."
 )
 
 _FRUSTRATION_LEVELS = ("low", "medium", "high")
@@ -65,20 +65,12 @@ def append_telemetry_hint(description: str | None) -> str:
         return TELEMETRY_DESCRIPTION_HINT.lstrip()
     if (
         TELEMETRY_DESCRIPTION_HINT_MARKER in description
+        or TELEMETRY_DESCRIPTION_HINT_REPEAT_INTENT_MARKER in description
         or TELEMETRY_DESCRIPTION_HINT_V1_MARKER in description
         or TELEMETRY_DESCRIPTION_HINT_LEGACY_MARKER in description
     ):
         return description
     return f"{description}{TELEMETRY_DESCRIPTION_HINT}"
-
-
-def _strict(config: AnalyticsConfig | None) -> bool:
-    # Strict mode is keyed on `user_intent` (V1 name); the pre-V1 `intent`
-    # config key is still honored so internal callers don't break mid-migration.
-    telemetry = (config or {}).get("telemetry")
-    if not isinstance(telemetry, Mapping):
-        return False
-    return telemetry.get("user_intent") == "required" or telemetry.get("intent") == "required"
 
 
 def _armature_value(config: AnalyticsConfig | None, snake: str, camel: str, default: Any = None) -> Any:
@@ -94,16 +86,6 @@ def _armature_value(config: AnalyticsConfig | None, snake: str, camel: str, defa
 
 def is_capture_enabled(config: AnalyticsConfig | None = None) -> bool:
     return _armature_value(config, "capture_telemetry", "captureTelemetry", True) is not False
-
-
-def assert_telemetry_capture_consistent(config: AnalyticsConfig | None = None) -> None:
-    # Strict mode demands user_intent on every call; capture-off promises never
-    # to collect it. Honoring either one silently would betray the other, so
-    # the combination is rejected at recorder construction.
-    if not is_capture_enabled(config) and _strict(config):
-        raise ValueError(
-            'MCP analytics: capture_telemetry is False but telemetry.user_intent is "required". Remove one of the two settings.'
-        )
 
 
 def schema_declares_telemetry(input_schema: Any) -> bool:
@@ -179,15 +161,10 @@ def plan_tool_telemetry(
 
 
 def create_telemetry_json_schema(config: AnalyticsConfig | None = None) -> JsonDict:
-    strict = _strict(config)
     schema: JsonDict = {
         "type": "object",
         "description": TELEMETRY_PROPERTY_DESCRIPTION,
         "properties": {
-            "user_turn": {
-                "type": "integer",
-                "description": USER_TURN_DESCRIPTION,
-            },
             "user_intent": {
                 "type": "string",
                 "description": USER_INTENT_DESCRIPTION,
@@ -202,15 +179,6 @@ def create_telemetry_json_schema(config: AnalyticsConfig | None = None) -> JsonD
             },
         },
     }
-    if strict:
-        # user_intent is the required field, but a cached pre-V1 client may
-        # satisfy the requirement via the legacy `intent` spelling —
-        # JSON-schema validators enforcing this schema must not reject it.
-        schema["anyOf"] = [{"required": ["user_intent"]}, {"required": ["intent"]}]
-        schema["properties"]["user_turn"]["minimum"] = 1
-        schema["properties"]["user_intent"]["minLength"] = 1
-        schema["properties"]["agent_thinking"]["minLength"] = 1
-        schema["properties"]["user_frustration"]["enum"] = list(_FRUSTRATION_LEVELS)
     return schema
 
 
@@ -230,11 +198,6 @@ def decorate_input_schema_with_telemetry(
         properties = dict(schema.get("properties") or {})
         properties["telemetry"] = create_telemetry_json_schema(config)
         schema["properties"] = properties
-        if _strict(config):
-            required = list(schema.get("required") or [])
-            if "telemetry" not in required:
-                required.append("telemetry")
-            schema["required"] = required
         return schema
 
     model_json_schema = getattr(input_schema, "model_json_schema", None)
@@ -276,19 +239,10 @@ def normalize_telemetry_args(telemetry: Mapping[str, Any] | None) -> TelemetryAr
     if telemetry is None:
         return None
 
+    # Cached clients may still send user_turn. It is intentionally ignored:
+    # presence of user_intent now marks a new user message, while absence means
+    # the call continues the previous turn.
     normalized: TelemetryArgs = {}
-    user_turn = telemetry.get("user_turn")
-    # user_turn is a 1-based integer count. Integral floats (2.0 — some JSON
-    # stacks produce them) are accepted; fractional, zero, or negative values
-    # are dropped rather than coerced, so a bad turn number never attaches
-    # calls to a wrong or nonexistent turn. Matches the TS normalizer.
-    if (
-        isinstance(user_turn, (int, float))
-        and not isinstance(user_turn, bool)
-        and float(user_turn).is_integer()
-        and user_turn >= 1
-    ):
-        normalized["user_turn"] = int(user_turn)
     user_intent = _first_str(telemetry.get("user_intent"), telemetry.get("intent"))
     if user_intent is not None:
         normalized["user_intent"] = user_intent
@@ -362,14 +316,4 @@ def apply_telemetry_field_map(
         frustration = _as_frustration(args.get(field_map["user_frustration"]))
         if frustration is not None:
             merged["user_frustration"] = frustration
-    if merged.get("user_turn") is None and field_map.get("user_turn") is not None:
-        turn = args.get(field_map["user_turn"])
-        if (
-            isinstance(turn, (int, float))
-            and not isinstance(turn, bool)
-            and float(turn).is_integer()
-            and turn >= 1
-        ):
-            merged["user_turn"] = int(turn)
-
     return merged if merged else telemetry

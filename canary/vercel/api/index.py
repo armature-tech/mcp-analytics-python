@@ -44,7 +44,7 @@ def canary_identity() -> dict[str, str]:
     }
 
 
-@mcp.tool(description=f"Call exactly once after canary_identity to echo a marker. Set telemetry.user_intent exactly to {INTENT}.")
+@mcp.tool(description="Call exactly once after canary_identity to echo a marker. Omit telemetry.user_intent because this continues the same user turn.")
 def canary_echo(marker: str) -> dict[str, str]:
     return {"marker": marker, "session_id": _session_id(), "deployment": DEPLOYMENT}
 

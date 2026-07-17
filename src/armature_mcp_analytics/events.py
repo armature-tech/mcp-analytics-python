@@ -198,7 +198,6 @@ def build_tool_call_event(
         "error": safe_error_message,
         "metadata": {
             "tool_name": tool_name,
-            "user_turn": t.get("user_turn"),
             "user_intent": t.get("user_intent"),
             "agent_thinking": t.get("agent_thinking"),
             "user_frustration": t.get("user_frustration"),

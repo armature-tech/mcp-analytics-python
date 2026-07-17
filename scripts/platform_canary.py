@@ -33,7 +33,10 @@ async def main() -> None:
             await recorder.record_tool_call(
                 name="canary_echo" if status == "ok" else "canary_expected_error",
                 args={"marker": f"{label}/{call}"},
-                telemetry={"user_intent": marker},
+                telemetry={
+                    **({"user_intent": marker} if call == "call-1" else {}),
+                    "agent_thinking": f"exercise the {status} path",
+                },
                 session_id=f"{marker}/{label}",
                 status=status,
                 result={"marker": f"{label}/{call}"} if status == "ok" else None,
