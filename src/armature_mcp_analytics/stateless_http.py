@@ -20,6 +20,11 @@ _SESSION_ID_RE = re.compile(
     r"^mcp_([A-Za-z0-9.-]+)_v_([A-Za-z0-9.-]*)_"
     r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
 )
+_SESSION_SEED_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-"
+    r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 _ANONYMOUS_NAME = "unknown"
 
 
@@ -29,13 +34,18 @@ def _slug_part(value: Any, fallback: str) -> str:
     return slug or fallback
 
 
-def build_stateless_session_id(client_info: McpClientInfo | None = None) -> str:
+def build_stateless_session_id(
+    client_info: McpClientInfo | None = None,
+    session_seed: str | None = None,
+) -> str:
     """Mint a session ID carrying the initialize request's client identity."""
 
     info = client_info or {}
     name = _slug_part(info.get("name"), _ANONYMOUS_NAME)
     version = _slug_part(info.get("version"), "")
-    return f"mcp_{name}_v_{version}_{uuid4()}"
+    seed = str(session_seed or "").strip()
+    session_uuid = seed.lower() if _SESSION_SEED_RE.fullmatch(seed) else str(uuid4())
+    return f"mcp_{name}_v_{version}_{session_uuid}"
 
 
 def parse_stateless_session_client_info(session_id: str | None) -> McpClientInfo | None:
@@ -151,7 +161,8 @@ def resolve_stateless_http_session(
     initialize = _find_initialize(body)
     if initialize is not None:
         session_id = build_stateless_session_id(
-            _client_info_from_initialize(initialize)
+            _client_info_from_initialize(initialize),
+            _header_value(headers, "x-armature-session-seed"),
         )
         return StatelessHttpSession(session_id=session_id, is_initialize=True)
 

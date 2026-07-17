@@ -6,7 +6,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
-from .emit import create_flushable_emitter, resolve_actor_seed
+from .emit import _config_value, create_flushable_emitter, resolve_actor_seed
 from .events import (
     build_actor_id,
     build_batch,
@@ -17,9 +17,23 @@ from .events import (
     normalize_started_at,
     process_scoped_session_id,
 )
-from .schema import append_telemetry_hint, decorate_input_schema_with_telemetry, extract_telemetry_arguments
+from .schema import (
+    apply_telemetry_field_map,
+    assert_telemetry_capture_consistent,
+    extract_telemetry_arguments,
+    is_capture_enabled,
+    plan_tool_telemetry,
+)
 from .stateless_http import parse_stateless_session_client_info
-from .types import AnalyticsConfig, JsonDict, McpClientInfo, RequestExtra, TelemetryArgs, ToolRegistration
+from .types import (
+    AnalyticsConfig,
+    JsonDict,
+    McpClientInfo,
+    RequestExtra,
+    TelemetryArgs,
+    TelemetryMode,
+    ToolRegistration,
+)
 from .utils import BoundedKeySet, derive_tool_result_error, header_value, workflow_run_id_from_headers
 
 
@@ -64,11 +78,13 @@ def _resolve_session_id(
 class _RegisteredTool:
     registration: ToolRegistration
     handler: Any
+    telemetry_mode: TelemetryMode = "injected"
 
 
 class AnalyticsRecorder:
     def __init__(self, config: AnalyticsConfig | None = None) -> None:
         self.config = config or {}
+        assert_telemetry_capture_consistent(self.config)
         self._emitter = create_flushable_emitter(self.config)
         self._session_init_keys = BoundedKeySet(10_000)
         self._tools: dict[str, _RegisteredTool] = {}
@@ -105,17 +121,27 @@ class AnalyticsRecorder:
         for definition in defs:
             item = dict(definition)
             schema = item.get("inputSchema", item.get("input_schema"))
-            item["description"] = append_telemetry_hint(item.get("description"))
-            item["inputSchema"] = decorate_input_schema_with_telemetry(
+            plan = plan_tool_telemetry(
+                str(item.get("name", "")),
                 schema if schema is not None else {"type": "object", "properties": {}},
                 self.config,
             )
+            # Owned/scrub tools pass through undecorated — their advertised
+            # schema and description must keep matching what the handler
+            # actually receives.
+            if plan.mode == "injected":
+                item["description"] = plan.apply_description(item.get("description"))
+            item["inputSchema"] = plan.input_schema
             item.pop("input_schema", None)
             decorated.append(item)
         return decorated
 
-    def extract_telemetry(self, args: Any) -> tuple[Any, TelemetryArgs | None]:
-        return extract_telemetry_arguments(args)
+    def extract_telemetry(
+        self,
+        args: Any,
+        mode: TelemetryMode = "injected",
+    ) -> tuple[Any, TelemetryArgs | None]:
+        return extract_telemetry_arguments(args, mode)
 
     async def record_session_init(
         self,
@@ -168,6 +194,26 @@ class AnalyticsRecorder:
         client_info: McpClientInfo | None = None,
         workflow_run_id: str | None = None,
     ) -> None:
+        # Single choke point for capture-off and field ownership
+        # (TELEMETRY-CONTRACT.md): telemetry handed in by any path —
+        # extraction, direct record_tool_call callers, a cached-schema client —
+        # is dropped here before it can reach the actor resolver, the event
+        # builder, `emit`, or `on_error`. A registered tool that owns its
+        # telemetry field never exports supplied telemetry either; the opt-in
+        # field map is the explicit way to export customer fields, and it only
+        # applies while capture is on.
+        if is_capture_enabled(self.config):
+            registered = self._tools.get(name)
+            if registered is not None and registered.telemetry_mode == "owned":
+                telemetry = None
+            telemetry = apply_telemetry_field_map(
+                telemetry,
+                args,
+                _config_value(self.config, "telemetry_field_map", "telemetryFieldMap"),
+            )
+        else:
+            telemetry = None
+
         actor_id = await self._actor_id_for(
             ctx=ctx,
             extra=extra,
@@ -198,6 +244,7 @@ class AnalyticsRecorder:
             started_at=started,
             finished_at=finished,
             workflow_run_id=effective_workflow_run_id,
+            redact=_config_value(self.config, "redact", "redact"),
         )
         await self._emitter.emit_batch(
             build_batch(
@@ -212,14 +259,17 @@ class AnalyticsRecorder:
         )
 
     async def instrument_tool_call(self, event: dict[str, Any], handler: Any) -> Any:
-        args, telemetry = extract_telemetry_arguments(event.get("args"))
+        args, telemetry = extract_telemetry_arguments(
+            event.get("args"),
+            event.get("telemetry_mode") or "injected",
+        )
         started = time.time()
         started_at = normalize_started_at()
         try:
             result = await _maybe_await(handler(args))
         except BaseException as error:
             record_error = self.record_tool_call(
-                **{k: v for k, v in event.items() if k != "args"},
+                **{k: v for k, v in event.items() if k not in ("args", "telemetry_mode")},
                 args=args,
                 telemetry=telemetry,
                 started_at=started_at,
@@ -247,7 +297,7 @@ class AnalyticsRecorder:
         result_error = derive_tool_result_error(result)
         try:
             await self.record_tool_call(
-                **{k: v for k, v in event.items() if k != "args"},
+                **{k: v for k, v in event.items() if k not in ("args", "telemetry_mode")},
                 args=args,
                 telemetry=telemetry,
                 started_at=started_at,
@@ -262,7 +312,12 @@ class AnalyticsRecorder:
 
     def tool(self, registration: ToolRegistration, handler: Any):
         name = registration["name"]
-        self._tools[name] = _RegisteredTool(registration=registration, handler=handler)
+        schema = registration.get("inputSchema", registration.get("input_schema"))
+        self._tools[name] = _RegisteredTool(
+            registration=registration,
+            handler=handler,
+            telemetry_mode=plan_tool_telemetry(name, schema, self.config).mode,
+        )
 
         async def dispatch_registered(raw_args: Any, context: dict[str, Any] | None = None) -> Any:
             return await self.dispatch(name, raw_args, context or {})
@@ -282,6 +337,7 @@ class AnalyticsRecorder:
             {
                 "name": name,
                 "args": raw_args,
+                "telemetry_mode": tool.telemetry_mode,
                 "ctx": context.get("ctx"),
                 "extra": context.get("extra"),
                 "headers": context.get("headers"),

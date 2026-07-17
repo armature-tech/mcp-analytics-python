@@ -4,8 +4,16 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from .sanitize import REDACTION_FAILED_PLACEHOLDER, prepare_for_preview
 from .schema import normalize_telemetry_args
-from .types import AnalyticsIngestBatch, AnalyticsIngestEvent, McpClientInfo, RequestExtra, TelemetryArgs
+from .types import (
+    AnalyticsIngestBatch,
+    AnalyticsIngestEvent,
+    McpClientInfo,
+    RedactFunction,
+    RequestExtra,
+    TelemetryArgs,
+)
 from .utils import (
     BoundedKeySet,
     MAX_CAPABILITIES_BYTES,
@@ -113,6 +121,35 @@ def _cap_capabilities(capabilities: Any) -> dict[str, Any] | None:
     return capabilities
 
 
+def _redact_telemetry(
+    telemetry: TelemetryArgs | None,
+    redact: RedactFunction | None,
+) -> TelemetryArgs | None:
+    # Telemetry text is agent-authored but routinely quotes the user, so the
+    # customer redaction hook sees it too. Whatever the hook returns is
+    # re-normalized; a raising hook drops the telemetry entirely (fail closed).
+    if telemetry is None or redact is None:
+        return telemetry
+    try:
+        redacted = redact(dict(telemetry))
+        return normalize_telemetry_args(redacted if isinstance(redacted, dict) else None)
+    except Exception:
+        return None
+
+
+def _redact_error_message(
+    error_message: str | None,
+    redact: RedactFunction | None,
+) -> str | None:
+    if error_message is None or redact is None:
+        return error_message
+    try:
+        redacted = redact(error_message)
+        return redacted if isinstance(redacted, str) else stringify_preview(redacted)
+    except Exception:
+        return REDACTION_FAILED_PLACEHOLDER
+
+
 def build_tool_call_event(
     *,
     tool_name: str,
@@ -128,17 +165,25 @@ def build_tool_call_event(
     started_at: str,
     finished_at: str,
     workflow_run_id: str | None = None,
+    redact: RedactFunction | None = None,
 ) -> AnalyticsIngestEvent:
-    input_preview, _ = truncate_utf8(stringify_preview(input), MAX_PREVIEW_BYTES)
+    # Contract pipeline (TELEMETRY-CONTRACT.md): sanitize → customer redact →
+    # stringify → truncate, for every payload that can carry customer data —
+    # input preview, the source built from the input, the result preview, the
+    # error string, and the telemetry text.
+    safe_input = prepare_for_preview(input, redact)
+    safe_output = None if output is None else prepare_for_preview(output, redact)
+    safe_error_message = _redact_error_message(error_message, redact)
+    input_preview, _ = truncate_utf8(stringify_preview(safe_input), MAX_PREVIEW_BYTES)
     source, source_truncated = truncate_utf8(
-        f"MCP tool call: {tool_name}\n\nInput:\n{stringify_preview(input)}",
+        f"MCP tool call: {tool_name}\n\nInput:\n{stringify_preview(safe_input)}",
         MAX_SOURCE_BYTES,
     )
     result_preview = None
     result_truncated = False
-    if output is not None:
-        result_preview, result_truncated = truncate_utf8(stringify_preview(output), MAX_PREVIEW_BYTES)
-    t = normalize_telemetry_args(telemetry) or {}
+    if safe_output is not None:
+        result_preview, result_truncated = truncate_utf8(stringify_preview(safe_output), MAX_PREVIEW_BYTES)
+    t = _redact_telemetry(normalize_telemetry_args(telemetry), redact) or {}
 
     return {
         **_workflow_stamp(workflow_run_id),
@@ -150,7 +195,7 @@ def build_tool_call_event(
         "finished_at": finished_at,
         "duration_ms": duration_ms,
         "ok": status == "ok",
-        "error": error_message,
+        "error": safe_error_message,
         "metadata": {
             "tool_name": tool_name,
             "user_turn": t.get("user_turn"),

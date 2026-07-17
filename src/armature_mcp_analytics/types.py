@@ -8,6 +8,25 @@ Headers = Mapping[str, str | list[str] | tuple[str, ...] | None]
 DeliveryMode = Literal["background", "await"]
 ToolStatus = Literal["ok", "error"]
 
+# How an instrumented tool handles the `telemetry` argument field, resolved
+# once per tool at registration (see plan_tool_telemetry): "injected" — the SDK
+# added the field, so strip it from args and export it; "owned" — the
+# customer's schema declares it, so never touch args and never export;
+# "scrub" — capture is off, so strip a cached-schema client's telemetry but
+# export nothing. See packages/TELEMETRY-CONTRACT.md.
+TelemetryMode = Literal["injected", "owned", "scrub"]
+
+# Applied to sanitized tool inputs/outputs (and the normalized telemetry and
+# error strings) before they are serialized into event previews. Must return
+# the value to serialize; a raise fails closed (the affected payload is
+# replaced with "[redaction failed]", the event still ships).
+RedactFunction = Callable[[Any], Any]
+
+# Opt-in export of customer-owned argument fields as Armature telemetry
+# (gap #11). Keys are the V1 telemetry field names; values are top-level
+# argument property names to READ (never strip) from the tool's arguments.
+TelemetryFieldMap = Mapping[str, str]
+
 
 # V1 telemetry field names. The pre-V1 spellings remain accepted on input
 # (clients holding a cached pre-V1 tool schema, callers passing telemetry
@@ -64,6 +83,16 @@ class ArmatureConfig(TypedDict, total=False):
     onError: Callable[[BaseException, "AnalyticsIngestBatch"], Any]
     timeout_ms: int | float
     timeoutMs: int | float
+    # Master switch for conversation-derived telemetry (user_intent,
+    # agent_thinking, user_frustration, user_turn). Default True. When False
+    # the SDK injects no telemetry schema/parameter, appends no description
+    # nudges, and never exports telemetry values — including values sent by
+    # clients holding a cached schema, which are stripped and dropped.
+    capture_telemetry: bool
+    captureTelemetry: bool
+    redact: RedactFunction
+    telemetry_field_map: TelemetryFieldMap
+    telemetryFieldMap: TelemetryFieldMap
 
 
 class AnalyticsConfig(TypedDict, total=False):

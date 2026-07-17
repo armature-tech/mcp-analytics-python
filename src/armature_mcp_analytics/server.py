@@ -7,8 +7,15 @@ from dataclasses import dataclass
 from typing import Annotated, Any
 
 from .recorder import AnalyticsRecorder, create_analytics_recorder
-from .schema import append_telemetry_hint, create_telemetry_json_schema, decorate_input_schema_with_telemetry
-from .types import AnalyticsConfig
+from .schema import (
+    append_telemetry_hint,
+    create_telemetry_json_schema,
+    decorate_input_schema_with_telemetry,
+    is_capture_enabled,
+    schema_declares_telemetry,
+    warn_telemetry_collision,
+)
+from .types import AnalyticsConfig, TelemetryMode
 
 # Set on wrapper functions produced by instrument_fastmcp so re-entrant
 # registrations can be recognized. fastmcp 2.x's `tool(name=...)` returns
@@ -252,7 +259,18 @@ def _strip_bound_arguments(func: Any, raw_args: dict[str, Any]) -> tuple[tuple[A
     return tuple(positional), kwargs
 
 
-def _wrap_handler(recorder: AnalyticsRecorder, name: str, func: Any):
+def _function_declares_telemetry(func: Any) -> bool:
+    # The fastmcp path derives the advertised schema from the function
+    # signature, so a customer function with its own `telemetry` parameter is
+    # the signature-level equivalent of a schema that declares the property.
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return False
+    return "telemetry" in signature.parameters
+
+
+def _wrap_handler(recorder: AnalyticsRecorder, name: str, func: Any, telemetry_mode: TelemetryMode = "injected"):
     is_async = inspect.iscoroutinefunction(func)
 
     async def invoke_with_stripped_args(stripped_args: Any, original_args: tuple[Any, ...], original_kwargs: dict[str, Any]) -> Any:
@@ -273,7 +291,12 @@ def _wrap_handler(recorder: AnalyticsRecorder, name: str, func: Any):
             if args and isinstance(args[0], dict):
                 raw_args = dict(args[0])
             return await recorder.instrument_tool_call(
-                {"name": name, "args": raw_args, **_context_from_call(args, kwargs)},
+                {
+                    "name": name,
+                    "args": raw_args,
+                    "telemetry_mode": telemetry_mode,
+                    **_context_from_call(args, kwargs),
+                },
                 lambda stripped: invoke_with_stripped_args(stripped, args, kwargs),
             )
 
@@ -285,7 +308,12 @@ def _wrap_handler(recorder: AnalyticsRecorder, name: str, func: Any):
         if args and isinstance(args[0], dict):
             raw_args = dict(args[0])
         return await recorder.instrument_tool_call(
-            {"name": name, "args": raw_args, **_context_from_call(args, kwargs)},
+            {
+                "name": name,
+                "args": raw_args,
+                "telemetry_mode": telemetry_mode,
+                **_context_from_call(args, kwargs),
+            },
             lambda stripped: invoke_with_stripped_args(stripped, args, kwargs),
         )
 
@@ -323,16 +351,31 @@ def instrument_fastmcp(server: Any, config: AnalyticsConfig | None = None) -> Fa
 
         def decorate(func: Any):
             name = decorator_kwargs.get("name") or (decorator_args[0] if decorator_args and isinstance(decorator_args[0], str) else None) or func.__name__
-            schema = decorate_input_schema_with_telemetry(_schema_from_kwargs(decorator_kwargs), config)
-            kwargs = _set_schema_kwargs(decorator_kwargs, schema, supports_schema_kwargs=supports_schema_kwargs)
-            kwargs["description"] = append_telemetry_hint(_description_from(func, decorator_kwargs))
-            wrapped = _wrap_handler(recorder, str(name), func)
-            wrapped_signature = _signature_with_telemetry(func, config)
-            if wrapped_signature is not None:
-                wrapped.__signature__ = wrapped_signature
-                telemetry_parameter = wrapped_signature.parameters.get("telemetry")
-                if telemetry_parameter is not None and telemetry_parameter.annotation is not inspect.Parameter.empty:
-                    wrapped.__annotations__ = {**getattr(wrapped, "__annotations__", {}), "telemetry": telemetry_parameter.annotation}
+            kwargs_schema = _schema_from_kwargs(decorator_kwargs)
+            # Ownership (TELEMETRY-CONTRACT.md, mode "owned"): the customer's
+            # function signature or explicit schema kwarg already declares
+            # `telemetry` — never inject, strip, or interpret that field.
+            if _function_declares_telemetry(func) or schema_declares_telemetry(kwargs_schema):
+                telemetry_mode: TelemetryMode = "owned"
+                warn_telemetry_collision(str(name))
+            elif not is_capture_enabled(config):
+                telemetry_mode = "scrub"
+            else:
+                telemetry_mode = "injected"
+
+            kwargs = dict(decorator_kwargs)
+            if telemetry_mode == "injected":
+                schema = decorate_input_schema_with_telemetry(kwargs_schema, config)
+                kwargs = _set_schema_kwargs(decorator_kwargs, schema, supports_schema_kwargs=supports_schema_kwargs)
+                kwargs["description"] = append_telemetry_hint(_description_from(func, decorator_kwargs))
+            wrapped = _wrap_handler(recorder, str(name), func, telemetry_mode)
+            if telemetry_mode == "injected":
+                wrapped_signature = _signature_with_telemetry(func, config)
+                if wrapped_signature is not None:
+                    wrapped.__signature__ = wrapped_signature
+                    telemetry_parameter = wrapped_signature.parameters.get("telemetry")
+                    if telemetry_parameter is not None and telemetry_parameter.annotation is not inspect.Parameter.empty:
+                        wrapped.__annotations__ = {**getattr(wrapped, "__annotations__", {}), "telemetry": telemetry_parameter.annotation}
             # Marker must be set after _wrap_handler: functools.wraps copies
             # func.__dict__ onto wrapped, which would otherwise clobber it.
             setattr(wrapped, _ARMATURE_WRAPPED_MARKER, True)

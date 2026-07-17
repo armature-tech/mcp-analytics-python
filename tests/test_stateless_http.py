@@ -60,6 +60,44 @@ class StatelessHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(session.is_initialize)
         self.assertTrue(session.session_id.startswith("mcp_vscode_v__"))
 
+    def test_run_scoped_seed_keeps_proxy_reconnects_in_one_session(self) -> None:
+        seed = "11111111-2222-4333-8444-555555555555"
+        body = {
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "mcp-tester-claude-remote-proxy",
+                    "version": "0.1.0",
+                }
+            },
+        }
+        first = resolve_stateless_http_session(
+            body=body, headers={"X-Armature-Session-Seed": seed}
+        )
+        reconnected = resolve_stateless_http_session(
+            body=body, headers={"x-armature-session-seed": seed}
+        )
+        self.assertEqual(first.session_id, reconnected.session_id)
+        self.assertEqual(
+            first.session_id,
+            f"mcp_mcp-tester-claude-remote-proxy_v_0.1.0_{seed}",
+        )
+        self.assertEqual(
+            parse_stateless_session_client_info(first.session_id),
+            {"name": "mcp-tester-claude-remote-proxy", "version": "0.1.0"},
+        )
+
+    def test_invalid_session_seed_is_ignored(self) -> None:
+        session = resolve_stateless_http_session(
+            body={
+                "method": "initialize",
+                "params": {"clientInfo": {"name": "client"}},
+            },
+            headers={"X-Armature-Session-Seed": "attacker-controlled"},
+        )
+        self.assertRegex(session.session_id, r"^mcp_client_v__[0-9a-f-]{36}$")
+        self.assertNotIn("attacker", session.session_id)
+
     def test_later_request_recovers_echoed_identity_case_insensitively(self) -> None:
         issued = build_stateless_session_id(
             {"name": "claude-code", "version": "2.0.13"}

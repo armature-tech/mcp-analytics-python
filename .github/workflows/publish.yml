@@ -17,8 +17,20 @@ jobs:
   publish:
     name: Publish to PyPI
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 60
     if: github.repository == 'armature-tech/mcp-analytics-python'
+    environment: sdk-canary-dev
+    env:
+      SDK_CANARY_INGEST_KEY: ${{ secrets.SDK_CANARY_INGEST_KEY }}
+      SDK_CANARY_READ_API_KEY: ${{ secrets.SDK_CANARY_READ_API_KEY }}
+      SDK_CANARY_MCP_SERVER_ID: ${{ vars.SDK_CANARY_MCP_SERVER_ID }}
+      SDK_CANARY_PLATFORM_URL: ${{ vars.SDK_CANARY_PLATFORM_URL }}
+      SDK_CANARY_DISPATCH_SECRET: ${{ secrets.SDK_CANARY_DISPATCH_SECRET }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+      VERCEL_SCOPE: ${{ vars.VERCEL_SCOPE }}
+      SDK_CANARY_VERCEL_PROJECT_ID: ${{ vars.SDK_CANARY_VERCEL_PROJECT_ID }}
+      SDK_CANARY_MCP_URL: ${{ vars.SDK_CANARY_MCP_URL }}
 
     steps:
       - name: Checkout
@@ -123,6 +135,41 @@ jobs:
           python -m build
           python -m tarfile -l dist/*.tar.gz
           python -m zipfile -l dist/*.whl
+
+      - name: Test exact wheel with FastMCP 2.x
+        if: steps.existing_release.outputs.published != 'true'
+        env:
+          ARMATURE_REQUIRE_FASTMCP: "1"
+        run: python scripts/run_publish_canary.py --artifact "$(ls dist/*.whl)" --fastmcp-major 2
+
+      - name: Validate live canary configuration
+        if: steps.existing_release.outputs.published != 'true'
+        run: |
+          set -euo pipefail
+          for name in SDK_CANARY_INGEST_KEY SDK_CANARY_READ_API_KEY SDK_CANARY_MCP_SERVER_ID SDK_CANARY_PLATFORM_URL SDK_CANARY_DISPATCH_SECRET VERCEL_TOKEN VERCEL_ORG_ID VERCEL_SCOPE SDK_CANARY_VERCEL_PROJECT_ID SDK_CANARY_MCP_URL; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing ${name} in the sdk-canary-dev environment." >&2
+              exit 1
+            fi
+          done
+
+      - name: Test exact wheel with FastMCP 3.x and Armature readback
+        if: steps.existing_release.outputs.published != 'true'
+        env:
+          ARMATURE_REQUIRE_FASTMCP: "1"
+        run: python scripts/run_publish_canary.py --require-platform --artifact "$(ls dist/*.whl)" --fastmcp-major 3
+
+      - name: Install Vercel CLI
+        if: steps.existing_release.outputs.published != 'true'
+        run: npm install --global vercel@55.0.0
+
+      - name: Deploy and promote exact candidate
+        if: steps.existing_release.outputs.published != 'true'
+        run: node canary/deploy-vercel.mjs --artifact "$(ls dist/*.whl)" --marker "sdk-canary/python/${GITHUB_SHA}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+      - name: Verify real Claude Code and Codex session isolation
+        if: steps.existing_release.outputs.published != 'true'
+        run: node canary/run-harness-canary.mjs --package python --marker "sdk-canary/python/${GITHUB_SHA}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 
       - name: Publish
         if: steps.existing_release.outputs.published != 'true'

@@ -1,0 +1,2 @@
+./vendor/CANDIDATE_WHEEL
+fastmcp>=3,<4

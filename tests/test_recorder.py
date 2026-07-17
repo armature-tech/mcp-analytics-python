@@ -2,11 +2,39 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from unittest import mock
 
 from armature_mcp_analytics import create_analytics_recorder, events
+from armature_mcp_analytics.emit import post_telemetry_event
 
 
 class RecorderTests(unittest.TestCase):
+    def test_default_emitter_uses_cloudflare_safe_headers(self) -> None:
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def getcode(self):
+                return 202
+
+        with mock.patch(
+            "armature_mcp_analytics.emit.urllib.request.urlopen",
+            return_value=Response(),
+        ) as urlopen:
+            asyncio.run(post_telemetry_event(
+                {"schema_version": 1, "events": []},
+                {"armature": {"api_key": "ami_test", "delivery": "await"}},
+            ))
+
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.get_header("Accept"), "application/json")
+        self.assertEqual(request.get_header("Content-type"), "application/json")
+        self.assertEqual(request.get_header("Authorization"), "Bearer ami_test")
+        self.assertEqual(request.get_header("User-agent"), "armature-mcp-analytics-python")
+
     def test_dispatch_strips_telemetry_and_emits_tool_call(self) -> None:
         batches = []
         recorder = create_analytics_recorder(

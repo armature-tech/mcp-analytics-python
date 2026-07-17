@@ -11,6 +11,7 @@ from .utils import header_value, read_env
 
 DEFAULT_ENDPOINT_URL = "https://app.armature.tech/api/mcp-analytics/ingest"
 DEFAULT_TIMEOUT_MS = 500
+DEFAULT_USER_AGENT = "armature-mcp-analytics-python"
 
 
 def _armature(config: AnalyticsConfig | None) -> dict[str, Any]:
@@ -73,8 +74,11 @@ async def post_telemetry_event(
         resolve_endpoint_url(config),
         data=body,
         headers={
+            "Accept": "application/json",
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
+            # Cloudflare blocks Python's default urllib user agent (error 1010).
+            "User-Agent": DEFAULT_USER_AGENT,
         },
         method="POST",
     )
