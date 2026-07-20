@@ -244,6 +244,9 @@ instrumentation = instrument_fastmcp(
             "actor_identifier": lambda input: "anything-at-all@example.com",
             "enabled": True,
             "delivery": "await",
+            "redact_secrets": True,
+            "redact_event": None,
+            "schedule": None,
             "timeout_ms": 500,
             "emit": None,
             "on_error": None,
@@ -265,7 +268,10 @@ instrumentation = instrument_fastmcp(
 | **emit** | Network emitter | Replace delivery for tests or custom pipelines |
 | **on_error** | None | Observe delivery failures |
 | **capture_telemetry** | **True** | Disable conversation-derived telemetry entirely (see below) |
+| **redact_secrets** | **True** | Disable only built-in high-confidence secret matching |
 | **redact** | None | Redact sensitive data from previews before delivery (see below) |
+| **redact_event** | None | Sync/async whole-event hook that may mutate or drop a tool call |
+| **schedule** | None | Register background work with a serverless lifecycle primitive |
 | **telemetry_field_map** | None | Export existing argument fields as telemetry (see below) |
 | **request_capability** | **False** | Inject `request_capability` so agents can report an unmet tool need |
 
@@ -292,7 +298,9 @@ If a tool function already declares its own `telemetry` parameter (or an explici
 
 ### Redaction and binary payloads
 
-Before any preview is serialized, the SDK strips binary content automatically: image/audio content-block `data`, resource `blob`s, base64 data URIs, and long base64 strings are replaced with `"[binary removed]"` / `"[base64 removed]"` placeholders. A **redact** callable then runs over the sanitized inputs, outputs, error strings, and telemetry text, and must return the value to serialize. The pipeline is sanitize → redact → stringify → truncate. If the callable raises, the SDK fails closed: the affected payload is replaced with `"[redaction failed]"` and the event still ships.
+Before serialization, the SDK bounds sanitizer work to 65,536 characters, removes binary/base64 payloads, and applies default-on high-confidence secret rules to inputs, outputs, errors, and telemetry text. Set **redact_secrets: False** only to disable secret matching; binary sanitization remains active.
+
+The legacy synchronous **redact** callable runs next. Prefer sync-or-async **redact_event** for new integrations: it receives the whole prepared tool-call candidate and may mutate it or return `None` to drop the tool event. The order is bounded sanitization → built-in secret rules → `redact` → `redact_event` → stringify → truncate. Exceptions fail closed with `"[redaction failed]"` placeholders.
 
 CamelCase aliases such as **endpointUrl**, **apiKey**, **actorId**,
 **actorIdentifier**, **timeoutMs**, and **onError** are
@@ -300,8 +308,10 @@ accepted for JavaScript parity.
 
 ### Delivery
 
-- **"background"** schedules delivery on the running event loop. Call **await instrumentation.recorder.flush()** during shutdown.
-- **"await"** waits for the delivery attempt before returning. Use it for serverless functions and short-lived processes.
+- **"background"** queues privacy work on the event loop. Use it for long-lived processes and call **await instrumentation.recorder.flush()** during shutdown.
+- **"await"** drains sanitization, hooks, and delivery before returning. Use it for serverless functions and short-lived processes.
+
+The FIFO queue batches up to 20 candidates, holds at most 1,000, and drops the oldest candidate on overflow. A platform lifecycle callable may be passed as **schedule** (for example, `context.wait_until`).
 
 If the API key is missing, delivery quietly no-ops for local development.
 

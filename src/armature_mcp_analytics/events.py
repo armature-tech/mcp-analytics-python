@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import inspect
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
 from .sanitize import REDACTION_FAILED_PLACEHOLDER, prepare_for_preview
+from .redact_secrets import redact_secrets_in_string
 from .schema import normalize_telemetry_args
 from .types import (
     AnalyticsIngestBatch,
     AnalyticsIngestEvent,
     McpClientInfo,
+    RedactableToolCall,
+    RedactEventHook,
     RedactFunction,
     RequestExtra,
     TelemetryArgs,
@@ -143,33 +148,142 @@ def _cap_capabilities(capabilities: Any) -> dict[str, Any] | None:
     return capabilities
 
 
-def _redact_telemetry(
+def _prepare_telemetry(
     telemetry: TelemetryArgs | None,
     redact: RedactFunction | None,
+    redact_secrets: bool,
 ) -> TelemetryArgs | None:
-    # Telemetry text is agent-authored but routinely quotes the user, so the
-    # customer redaction hook sees it too. Whatever the hook returns is
-    # re-normalized; a raising hook drops the telemetry entirely (fail closed).
-    if telemetry is None or redact is None:
-        return telemetry
+    normalized = normalize_telemetry_args(telemetry)
+    if normalized is None:
+        return None
+    protected: TelemetryArgs = {
+        **normalized,
+        **(
+            {"user_intent": redact_secrets_in_string(normalized["user_intent"])}
+            if redact_secrets and isinstance(normalized.get("user_intent"), str)
+            else {}
+        ),
+        **(
+            {"agent_thinking": redact_secrets_in_string(normalized["agent_thinking"])}
+            if redact_secrets and isinstance(normalized.get("agent_thinking"), str)
+            else {}
+        ),
+    }
+    if redact is None:
+        return protected
     try:
-        redacted = redact(dict(telemetry))
-        return normalize_telemetry_args(redacted if isinstance(redacted, dict) else None)
+        redacted = redact(protected)
+        return normalize_telemetry_args(redacted) if isinstance(redacted, Mapping) else None
     except Exception:
         return None
 
 
-def _redact_error_message(
+def _prepare_error_message(
     error_message: str | None,
     redact: RedactFunction | None,
+    redact_secrets: bool,
 ) -> str | None:
-    if error_message is None or redact is None:
-        return error_message
+    if error_message is None:
+        return None
+    protected = redact_secrets_in_string(error_message) if redact_secrets else error_message
+    if redact is None:
+        return protected
     try:
-        redacted = redact(error_message)
+        redacted = redact(protected)
         return redacted if isinstance(redacted, str) else stringify_preview(redacted)
     except Exception:
         return REDACTION_FAILED_PLACEHOLDER
+
+
+def _prepare_tool_call_candidate(
+    *,
+    tool_name: str,
+    telemetry: TelemetryArgs | None,
+    input: Any,
+    output: Any,
+    status: str,
+    duration_ms: int,
+    error_message: str | None,
+    session_id: str | None,
+    redact: RedactFunction | None,
+    redact_secrets: bool,
+) -> RedactableToolCall:
+    candidate: RedactableToolCall = {
+        "kind": "tool_call",
+        "tool_name": tool_name,
+        "status": status,  # type: ignore[typeddict-item]
+        "duration_ms": duration_ms,
+        "input": prepare_for_preview(input, redact, redact_secrets=redact_secrets),
+    }
+    if session_id:
+        candidate["session_id"] = session_id
+    if output is not None:
+        candidate["output"] = prepare_for_preview(output, redact, redact_secrets=redact_secrets)
+    if error_message is not None:
+        candidate["error_message"] = _prepare_error_message(error_message, redact, redact_secrets)
+    prepared_telemetry = _prepare_telemetry(telemetry, redact, redact_secrets)
+    if prepared_telemetry is not None:
+        candidate["telemetry"] = prepared_telemetry
+    return candidate
+
+
+def _assemble_tool_call_event(
+    candidate: RedactableToolCall,
+    *,
+    actor_id: str,
+    request_id: str,
+    started_at: str,
+    finished_at: str,
+    workflow_run_id: str | None,
+    capability_request: bool,
+) -> AnalyticsIngestEvent:
+    candidate_input = candidate.get("input")
+    input_preview, _ = truncate_utf8(stringify_preview(candidate_input), MAX_PREVIEW_BYTES)
+    source, source_truncated = truncate_utf8(
+        f"MCP tool call: {candidate['tool_name']}\n\nInput:\n{stringify_preview(candidate_input)}",
+        MAX_SOURCE_BYTES,
+    )
+    result_preview = None
+    result_truncated = False
+    if "output" in candidate:
+        result_preview, result_truncated = truncate_utf8(
+            stringify_preview(candidate["output"]), MAX_PREVIEW_BYTES
+        )
+    t = normalize_telemetry_args(candidate.get("telemetry")) or {}
+
+    metadata: dict[str, Any] = {
+        "tool_name": candidate["tool_name"],
+        "user_intent": t.get("user_intent"),
+        "agent_thinking": t.get("agent_thinking"),
+        "user_frustration": t.get("user_frustration"),
+        "intent": t.get("user_intent"),
+        "context": t.get("agent_thinking"),
+        "frustration_level": t.get("user_frustration"),
+        "input_preview": input_preview,
+    }
+    if capability_request:
+        metadata["capability_request"] = True
+
+    return {
+        **_workflow_stamp(workflow_run_id),
+        "event_id": build_event_id(actor_id=actor_id, request_id=request_id, kind="tool_call"),
+        "kind": "tool_call",
+        "actor_id": actor_id,
+        "session_id_hint": candidate.get("session_id"),
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "duration_ms": candidate["duration_ms"],
+        "ok": candidate["status"] == "ok",
+        "error": candidate.get("error_message"),
+        "metadata": metadata,
+        "script_source": source,
+        "script_source_truncated": source_truncated,
+        "result_preview": result_preview,
+        "result_truncated": result_truncated,
+        "calls": [],
+        "logs": [],
+        "search_calls": [],
+    }
 
 
 def build_tool_call_event(
@@ -189,60 +303,88 @@ def build_tool_call_event(
     workflow_run_id: str | None = None,
     capability_request: bool = False,
     redact: RedactFunction | None = None,
+    redact_secrets: bool = True,
 ) -> AnalyticsIngestEvent:
-    # Contract pipeline (TELEMETRY-CONTRACT.md): sanitize → customer redact →
-    # stringify → truncate, for every payload that can carry customer data —
-    # input preview, the source built from the input, the result preview, the
-    # error string, and the telemetry text.
-    safe_input = prepare_for_preview(input, redact)
-    safe_output = None if output is None else prepare_for_preview(output, redact)
-    safe_error_message = _redact_error_message(error_message, redact)
-    input_preview, _ = truncate_utf8(stringify_preview(safe_input), MAX_PREVIEW_BYTES)
-    source, source_truncated = truncate_utf8(
-        f"MCP tool call: {tool_name}\n\nInput:\n{stringify_preview(safe_input)}",
-        MAX_SOURCE_BYTES,
+    candidate = _prepare_tool_call_candidate(
+        tool_name=tool_name,
+        telemetry=telemetry,
+        input=input,
+        output=output,
+        status=status,
+        duration_ms=duration_ms,
+        error_message=error_message,
+        session_id=session_id,
+        redact=redact,
+        redact_secrets=redact_secrets,
     )
-    result_preview = None
-    result_truncated = False
-    if safe_output is not None:
-        result_preview, result_truncated = truncate_utf8(stringify_preview(safe_output), MAX_PREVIEW_BYTES)
-    t = _redact_telemetry(normalize_telemetry_args(telemetry), redact) or {}
+    return _assemble_tool_call_event(
+        candidate,
+        actor_id=actor_id,
+        request_id=request_id,
+        started_at=started_at,
+        finished_at=finished_at,
+        workflow_run_id=workflow_run_id,
+        capability_request=capability_request,
+    )
 
-    metadata: dict[str, Any] = {
-        "tool_name": tool_name,
-        "user_intent": t.get("user_intent"),
-        "agent_thinking": t.get("agent_thinking"),
-        "user_frustration": t.get("user_frustration"),
-        # Legacy mirrors (pre-V1 key names) so an ingest that hasn't picked
-        # up the V1 schema keeps reading events from this SDK.
-        "intent": t.get("user_intent"),
-        "context": t.get("agent_thinking"),
-        "frustration_level": t.get("user_frustration"),
-        "input_preview": input_preview,
-    }
-    if capability_request:
-        metadata["capability_request"] = True
 
-    return {
-        **_workflow_stamp(workflow_run_id),
-        "event_id": build_event_id(actor_id=actor_id, request_id=request_id, kind="tool_call"),
-        "kind": "tool_call",
-        "actor_id": actor_id,
-        "session_id_hint": session_id,
-        "started_at": started_at,
-        "finished_at": finished_at,
-        "duration_ms": duration_ms,
-        "ok": status == "ok",
-        "error": safe_error_message,
-        "metadata": metadata,
-        "script_source": source,
-        "script_source_truncated": source_truncated,
-        "result_preview": result_preview,
-        "result_truncated": result_truncated,
-        "calls": [],
-        "logs": [],
-        "search_calls": [],
-    }
+async def finalize_tool_call_event(
+    *,
+    tool_name: str,
+    telemetry: TelemetryArgs | None,
+    input: Any,
+    output: Any = None,
+    status: str,
+    duration_ms: int,
+    error_message: str | None,
+    actor_id: str,
+    session_id: str | None,
+    request_id: str,
+    started_at: str,
+    finished_at: str,
+    workflow_run_id: str | None = None,
+    capability_request: bool = False,
+    redact: RedactFunction | None = None,
+    redact_secrets: bool = True,
+    redact_event: RedactEventHook | None = None,
+) -> AnalyticsIngestEvent | None:
+    candidate = _prepare_tool_call_candidate(
+        tool_name=tool_name,
+        telemetry=telemetry,
+        input=input,
+        output=output,
+        status=status,
+        duration_ms=duration_ms,
+        error_message=error_message,
+        session_id=session_id,
+        redact=redact,
+        redact_secrets=redact_secrets,
+    )
+    if redact_event is not None:
+        try:
+            redacted = redact_event(candidate)
+            if inspect.isawaitable(redacted):
+                redacted = await redacted
+            if redacted is None:
+                return None
+            candidate = redacted
+        except Exception:
+            candidate = {
+                **candidate,
+                "input": REDACTION_FAILED_PLACEHOLDER,
+                "output": REDACTION_FAILED_PLACEHOLDER,
+                "error_message": REDACTION_FAILED_PLACEHOLDER,
+            }
+            candidate.pop("telemetry", None)
+    return _assemble_tool_call_event(
+        candidate,
+        actor_id=actor_id,
+        request_id=request_id,
+        started_at=started_at,
+        finished_at=finished_at,
+        workflow_run_id=workflow_run_id,
+        capability_request=capability_request,
+    )
 
 
 def build_session_init_event(

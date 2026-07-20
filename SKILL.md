@@ -77,19 +77,24 @@ no-ops; that is intentional for local development.
 
 ## Step 4: Pick delivery mode
 
-The default is `delivery: "background"`, which schedules delivery on the
-running event loop. That can drop batches in short-lived or per-request
-serverless handlers.
+The default is `delivery: "background"`, which queues sanitization, redaction,
+and delivery on the running event loop. That can drop work in short-lived or
+per-request serverless handlers.
 
 Use this table:
 
 | Runtime | `delivery` |
 | --- | --- |
-| Vercel / Lambda / Cloud Run request handlers / short-lived commands | `"await"` |
+| Vercel / Lambda / Cloud Run request handlers / short-lived commands | `"await"`, or background with a platform `schedule` hook |
 | Long-lived Python process or container | `"background"` plus `await instrumentation.recorder.flush()` at shutdown |
 
 If you are not sure, choose `"await"`. It is the safer integration default and
-only waits for the telemetry delivery attempt.
+drains the entire privacy queue before returning.
+
+Built-in high-confidence secret redaction is default-on. Prefer the sync-or-
+async whole-event `redact_event` hook for custom policy; it may mutate or drop
+a tool event. The legacy `redact` callable remains supported and runs first.
+Set `redact_secrets: False` only when explicitly replacing the built-ins.
 
 ### Stateless HTTP / serverless sessions
 

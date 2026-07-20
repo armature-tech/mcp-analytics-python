@@ -22,6 +22,24 @@ TelemetryMode = Literal["injected", "owned", "scrub"]
 # replaced with "[redaction failed]", the event still ships).
 RedactFunction = Callable[[Any], Any]
 
+
+class RedactableToolCall(TypedDict, total=False):
+    kind: Literal["tool_call"]
+    tool_name: str
+    status: ToolStatus
+    duration_ms: int
+    session_id: str
+    input: Any
+    output: Any
+    error_message: str
+    telemetry: "TelemetryArgs"
+
+
+RedactEventHook = Callable[
+    [RedactableToolCall],
+    RedactableToolCall | None | Awaitable[RedactableToolCall | None],
+]
+
 # Opt-in export of customer-owned argument fields as Armature telemetry
 # (gap #11). Keys are the V1 telemetry field names; values are top-level
 # argument property names to READ (never strip) from the tool's arguments.
@@ -94,7 +112,12 @@ class ArmatureConfig(TypedDict, total=False):
     # clients holding a cached schema, which are stripped and dropped.
     capture_telemetry: bool
     captureTelemetry: bool
+    redact_secrets: bool
+    redactSecrets: bool
     redact: RedactFunction
+    redact_event: RedactEventHook
+    redactEvent: RedactEventHook
+    schedule: Callable[[Awaitable[None]], Any]
     telemetry_field_map: TelemetryFieldMap
     telemetryFieldMap: TelemetryFieldMap
     request_capability: bool

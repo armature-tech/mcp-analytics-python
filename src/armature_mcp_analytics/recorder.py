@@ -12,18 +12,19 @@ from .capability import (
     request_capability_enabled,
     request_capability_registration,
 )
-from .emit import _config_value, create_flushable_emitter, resolve_actor_identifier, resolve_actor_seed
+from .emit import _config_value, resolve_actor_identifier, resolve_actor_seed
 from .events import (
     build_actor_id,
     build_actor_identity_event,
     build_batch,
     build_session_init_batch,
-    build_tool_call_event,
+    finalize_tool_call_event,
     normalize_request_id,
     normalize_session_id,
     normalize_started_at,
     process_scoped_session_id,
 )
+from .queue import create_privacy_queue
 from .schema import (
     apply_telemetry_field_map,
     extract_telemetry_arguments,
@@ -92,7 +93,7 @@ class _RegisteredTool:
 class AnalyticsRecorder:
     def __init__(self, config: AnalyticsConfig | None = None) -> None:
         self.config = config or {}
-        self._emitter = create_flushable_emitter(self.config)
+        self._privacy_queue = create_privacy_queue(self.config)
         self._session_init_keys = BoundedKeySet(10_000)
         self._tools: dict[str, _RegisteredTool] = {}
         self._pending_record_tasks: set[asyncio.Task[None]] = set()
@@ -185,22 +186,26 @@ class AnalyticsRecorder:
             client_info = parse_stateless_session_client_info(normalized_session_id)
         if not normalized_session_id:
             return
-        actor_id, actor_identifier = await self._analytics_context_for(
-            ctx=ctx, extra=extra, headers=headers, auth_info=auth_info
-        )
         started = normalize_started_at(started_at)
-        batch = build_session_init_batch(
-            actor_id=actor_id,
-            session_id=normalized_session_id,
-            started_at=started,
-            extra=extra,
-            session_init_keys=self._session_init_keys,
-            client_info=client_info,
-            workflow_run_id=self._workflow_run_id(workflow_run_id, headers, extra),
-            identity_event=self._identity_event_for(actor_id, actor_identifier, started),
-        )
-        if batch:
-            await self._emitter.emit_batch(batch)
+        effective_workflow_run_id = self._workflow_run_id(workflow_run_id, headers, extra)
+
+        async def finalize() -> list[dict[str, Any]] | None:
+            actor_id, actor_identifier = await self._analytics_context_for(
+                ctx=ctx, extra=extra, headers=headers, auth_info=auth_info
+            )
+            batch = build_session_init_batch(
+                actor_id=actor_id,
+                session_id=normalized_session_id,
+                started_at=started,
+                extra=extra,
+                session_init_keys=self._session_init_keys,
+                client_info=client_info,
+                workflow_run_id=effective_workflow_run_id,
+                identity_event=self._identity_event_for(actor_id, actor_identifier, started),
+            )
+            return None if batch is None else batch["events"]
+
+        await self._privacy_queue.enqueue(finalize)  # type: ignore[arg-type]
 
     async def record_tool_call(
         self,
@@ -243,14 +248,6 @@ class AnalyticsRecorder:
         else:
             telemetry = None
 
-        actor_id, actor_identifier = await self._analytics_context_for(
-            ctx=ctx,
-            extra=extra,
-            headers=headers,
-            auth_info=auth_info,
-            tool_name=name,
-            telemetry=telemetry,
-        )
         finished_ms = time.time() * 1000
         started = normalize_started_at(started_at, duration_ms=duration_ms, finished_at_ms=finished_ms)
         finished = normalize_started_at(finished_ms)
@@ -259,35 +256,67 @@ class AnalyticsRecorder:
             client_info = parse_stateless_session_client_info(normalized_session_id)
         error_message = None if error is None else str(error)
         effective_workflow_run_id = self._workflow_run_id(workflow_run_id, headers, extra)
-        event = build_tool_call_event(
-            tool_name=name,
-            telemetry=telemetry,
-            input=args,
-            output=result,
-            status=status,
-            duration_ms=duration_ms,
-            error_message=error_message,
-            actor_id=actor_id,
-            session_id=normalized_session_id,
-            request_id=normalize_request_id(request_id),
-            started_at=started,
-            finished_at=finished,
-            workflow_run_id=effective_workflow_run_id,
-            capability_request=capability_request,
-            redact=_config_value(self.config, "redact", "redact"),
-        )
-        await self._emitter.emit_batch(
-            build_batch(
-                event=event,
-                extra={**(extra or {}), **({"sessionId": normalized_session_id} if normalized_session_id else {})},
-                actor_id=actor_id,
-                started_at=started,
-                session_init_keys=self._session_init_keys,
-                client_info=client_info,
-                workflow_run_id=effective_workflow_run_id,
-                identity_event=self._identity_event_for(actor_id, actor_identifier, started),
+        normalized_request_id = normalize_request_id(request_id)
+
+        async def finalize() -> list[dict[str, Any]] | None:
+            actor_id, actor_identifier = await self._analytics_context_for(
+                ctx=ctx,
+                extra=extra,
+                headers=headers,
+                auth_info=auth_info,
+                tool_name=name,
+                telemetry=telemetry,
             )
-        )
+            event = await finalize_tool_call_event(
+                tool_name=name,
+                telemetry=telemetry,
+                input=args,
+                output=result,
+                status=status,
+                duration_ms=duration_ms,
+                error_message=error_message,
+                actor_id=actor_id,
+                session_id=normalized_session_id,
+                request_id=normalized_request_id,
+                started_at=started,
+                finished_at=finished,
+                workflow_run_id=effective_workflow_run_id,
+                capability_request=capability_request,
+                redact=_config_value(self.config, "redact", "redact"),
+                redact_secrets=_config_value(self.config, "redact_secrets", "redactSecrets", True) is not False,
+                redact_event=_config_value(self.config, "redact_event", "redactEvent"),
+            )
+            identity_event = self._identity_event_for(actor_id, actor_identifier, started)
+            effective_extra = {
+                **(extra or {}),
+                **({"sessionId": normalized_session_id} if normalized_session_id else {}),
+            }
+            if event is not None:
+                return build_batch(
+                    event=event,
+                    extra=effective_extra,
+                    actor_id=actor_id,
+                    started_at=started,
+                    session_init_keys=self._session_init_keys,
+                    client_info=client_info,
+                    workflow_run_id=effective_workflow_run_id,
+                    identity_event=identity_event,
+                )["events"]
+            if normalized_session_id:
+                batch = build_session_init_batch(
+                    actor_id=actor_id,
+                    session_id=normalized_session_id,
+                    started_at=started,
+                    extra=effective_extra,
+                    session_init_keys=self._session_init_keys,
+                    client_info=client_info,
+                    workflow_run_id=effective_workflow_run_id,
+                    identity_event=identity_event,
+                )
+                return None if batch is None else batch["events"]
+            return [identity_event] if identity_event is not None else None
+
+        await self._privacy_queue.enqueue(finalize)  # type: ignore[arg-type]
 
     async def instrument_tool_call(self, event: dict[str, Any], handler: Any) -> Any:
         args, telemetry = extract_telemetry_arguments(
@@ -428,7 +457,7 @@ class AnalyticsRecorder:
     async def flush(self) -> None:
         while self._pending_record_tasks:
             await asyncio.gather(*list(self._pending_record_tasks), return_exceptions=True)
-        await self._emitter.flush()
+        await self._privacy_queue.flush()
 
 
 def create_analytics_recorder(config: AnalyticsConfig | None = None) -> AnalyticsRecorder:
