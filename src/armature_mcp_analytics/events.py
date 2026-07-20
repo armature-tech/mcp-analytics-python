@@ -165,6 +165,7 @@ def build_tool_call_event(
     started_at: str,
     finished_at: str,
     workflow_run_id: str | None = None,
+    capability_request: bool = False,
     redact: RedactFunction | None = None,
 ) -> AnalyticsIngestEvent:
     # Contract pipeline (TELEMETRY-CONTRACT.md): sanitize → customer redact →
@@ -185,6 +186,21 @@ def build_tool_call_event(
         result_preview, result_truncated = truncate_utf8(stringify_preview(safe_output), MAX_PREVIEW_BYTES)
     t = _redact_telemetry(normalize_telemetry_args(telemetry), redact) or {}
 
+    metadata: dict[str, Any] = {
+        "tool_name": tool_name,
+        "user_intent": t.get("user_intent"),
+        "agent_thinking": t.get("agent_thinking"),
+        "user_frustration": t.get("user_frustration"),
+        # Legacy mirrors (pre-V1 key names) so an ingest that hasn't picked
+        # up the V1 schema keeps reading events from this SDK.
+        "intent": t.get("user_intent"),
+        "context": t.get("agent_thinking"),
+        "frustration_level": t.get("user_frustration"),
+        "input_preview": input_preview,
+    }
+    if capability_request:
+        metadata["capability_request"] = True
+
     return {
         **_workflow_stamp(workflow_run_id),
         "event_id": build_event_id(actor_id=actor_id, request_id=request_id, kind="tool_call"),
@@ -196,18 +212,7 @@ def build_tool_call_event(
         "duration_ms": duration_ms,
         "ok": status == "ok",
         "error": safe_error_message,
-        "metadata": {
-            "tool_name": tool_name,
-            "user_intent": t.get("user_intent"),
-            "agent_thinking": t.get("agent_thinking"),
-            "user_frustration": t.get("user_frustration"),
-            # Legacy mirrors (pre-V1 key names) so an ingest that hasn't picked
-            # up the V1 schema keeps reading events from this SDK.
-            "intent": t.get("user_intent"),
-            "context": t.get("agent_thinking"),
-            "frustration_level": t.get("user_frustration"),
-            "input_preview": input_preview,
-        },
+        "metadata": metadata,
         "script_source": source,
         "script_source_truncated": source_truncated,
         "result_preview": result_preview,

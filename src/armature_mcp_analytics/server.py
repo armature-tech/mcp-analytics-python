@@ -6,6 +6,14 @@ import inspect
 from dataclasses import dataclass
 from typing import Annotated, Any
 
+from .capability import (
+    REQUEST_CAPABILITY_ACKNOWLEDGMENT,
+    REQUEST_CAPABILITY_ARGUMENT_DESCRIPTION,
+    REQUEST_CAPABILITY_DESCRIPTION,
+    REQUEST_CAPABILITY_TOOL_NAME,
+    request_capability_enabled,
+    request_capability_registration,
+)
 from .recorder import AnalyticsRecorder, create_analytics_recorder
 from .schema import (
     append_telemetry_hint,
@@ -83,6 +91,24 @@ def _telemetry_annotation(config: AnalyticsConfig | None) -> Any:
         # input_schema kwarg path (FakeFastMCP-style servers) still applies.
         return annotation
     return Annotated[annotation, WithJsonSchema(create_telemetry_json_schema(config))]
+
+
+def _capability_annotation() -> Any:
+    try:
+        from pydantic import WithJsonSchema
+    except Exception:
+        return str
+    return Annotated[
+        str,
+        WithJsonSchema(
+            {
+                "type": "string",
+                "description": REQUEST_CAPABILITY_ARGUMENT_DESCRIPTION,
+                "minLength": 1,
+                "maxLength": 1000,
+            }
+        ),
+    ]
 
 
 def _signature_with_telemetry(func: Any, config: AnalyticsConfig | None = None) -> inspect.Signature | None:
@@ -268,7 +294,14 @@ def _function_declares_telemetry(func: Any) -> bool:
     return "telemetry" in signature.parameters
 
 
-def _wrap_handler(recorder: AnalyticsRecorder, name: str, func: Any, telemetry_mode: TelemetryMode = "injected"):
+def _wrap_handler(
+    recorder: AnalyticsRecorder,
+    name: str,
+    func: Any,
+    telemetry_mode: TelemetryMode = "injected",
+    *,
+    capability_request: bool = False,
+):
     is_async = inspect.iscoroutinefunction(func)
 
     async def invoke_with_stripped_args(stripped_args: Any, original_args: tuple[Any, ...], original_kwargs: dict[str, Any]) -> Any:
@@ -293,6 +326,7 @@ def _wrap_handler(recorder: AnalyticsRecorder, name: str, func: Any, telemetry_m
                     "name": name,
                     "args": raw_args,
                     "telemetry_mode": telemetry_mode,
+                    "capability_request": capability_request,
                     **_context_from_call(args, kwargs),
                 },
                 lambda stripped: invoke_with_stripped_args(stripped, args, kwargs),
@@ -310,6 +344,7 @@ def _wrap_handler(recorder: AnalyticsRecorder, name: str, func: Any, telemetry_m
                 "name": name,
                 "args": raw_args,
                 "telemetry_mode": telemetry_mode,
+                "capability_request": capability_request,
                 **_context_from_call(args, kwargs),
             },
             lambda stripped: invoke_with_stripped_args(stripped, args, kwargs),
@@ -324,6 +359,18 @@ class FastMCPInstrumentation:
     recorder: AnalyticsRecorder
 
 
+def _server_has_tool_named(server: Any, name: str) -> bool:
+    candidates = [server, getattr(server, "_tool_manager", None)]
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        for attribute in ("tools", "_tools"):
+            tools = getattr(candidate, attribute, None)
+            if isinstance(tools, dict) and name in tools:
+                return True
+    return False
+
+
 def instrument_fastmcp(server: Any, config: AnalyticsConfig | None = None) -> FastMCPInstrumentation:
     existing = getattr(server, "armature_analytics_instrumentation", None)
     if isinstance(existing, FastMCPInstrumentation):
@@ -334,6 +381,47 @@ def instrument_fastmcp(server: Any, config: AnalyticsConfig | None = None) -> Fa
     if not callable(original_tool):
         raise TypeError("instrument_fastmcp expects a FastMCP-like object with a callable .tool attribute.")
     supports_schema_kwargs = _supports_schema_kwargs(original_tool)
+
+    if request_capability_enabled(config):
+        if _server_has_tool_named(server, REQUEST_CAPABILITY_TOOL_NAME):
+            raise ValueError(
+                "Tool name 'request_capability' is reserved while "
+                "armature.request_capability is enabled."
+            )
+
+        def request_capability(capability: str) -> str:
+            if not capability.strip() or len(capability) > 1000:
+                raise ValueError(
+                    "capability must be a non-empty string of at most 1000 characters"
+                )
+            return REQUEST_CAPABILITY_ACKNOWLEDGMENT
+
+        request_capability.__doc__ = REQUEST_CAPABILITY_DESCRIPTION
+        wrapped_request_capability = _wrap_handler(
+            recorder,
+            REQUEST_CAPABILITY_TOOL_NAME,
+            request_capability,
+            "scrub",
+            capability_request=True,
+        )
+        request_signature = inspect.signature(request_capability)
+        capability_parameter = request_signature.parameters["capability"].replace(
+            annotation=_capability_annotation()
+        )
+        wrapped_request_capability.__signature__ = request_signature.replace(
+            parameters=[capability_parameter]
+        )
+        wrapped_request_capability.__annotations__ = {
+            **getattr(wrapped_request_capability, "__annotations__", {}),
+            "capability": capability_parameter.annotation,
+        }
+        capability_kwargs: dict[str, Any] = {
+            "name": REQUEST_CAPABILITY_TOOL_NAME,
+            "description": REQUEST_CAPABILITY_DESCRIPTION,
+        }
+        if supports_schema_kwargs:
+            capability_kwargs["input_schema"] = request_capability_registration()["inputSchema"]
+        original_tool(**capability_kwargs)(wrapped_request_capability)
 
     def instrumenting_tool(*decorator_args: Any, **decorator_kwargs: Any):
         # Re-entry guard: fastmcp 2.x's deferred registration comes back
@@ -349,6 +437,14 @@ def instrument_fastmcp(server: Any, config: AnalyticsConfig | None = None) -> Fa
 
         def decorate(func: Any):
             name = decorator_kwargs.get("name") or (decorator_args[0] if decorator_args and isinstance(decorator_args[0], str) else None) or func.__name__
+            if (
+                request_capability_enabled(config)
+                and str(name) == REQUEST_CAPABILITY_TOOL_NAME
+            ):
+                raise ValueError(
+                    "Tool name 'request_capability' is reserved while "
+                    "armature.request_capability is enabled."
+                )
             kwargs_schema = _schema_from_kwargs(decorator_kwargs)
             # Ownership (TELEMETRY-CONTRACT.md, mode "owned"): the customer's
             # function signature or explicit schema kwarg already declares

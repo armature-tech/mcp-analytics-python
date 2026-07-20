@@ -6,6 +6,12 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from .capability import (
+    REQUEST_CAPABILITY_TOOL_NAME,
+    acknowledge_capability_request,
+    request_capability_enabled,
+    request_capability_registration,
+)
 from .emit import _config_value, create_flushable_emitter, resolve_actor_seed
 from .events import (
     build_actor_id,
@@ -78,6 +84,8 @@ class _RegisteredTool:
     registration: ToolRegistration
     handler: Any
     telemetry_mode: TelemetryMode = "injected"
+    decorate_with_telemetry: bool = True
+    internal: bool = False
 
 
 class AnalyticsRecorder:
@@ -87,6 +95,14 @@ class AnalyticsRecorder:
         self._session_init_keys = BoundedKeySet(10_000)
         self._tools: dict[str, _RegisteredTool] = {}
         self._pending_record_tasks: set[asyncio.Task[None]] = set()
+        if request_capability_enabled(self.config):
+            self._register_tool(
+                request_capability_registration(),
+                acknowledge_capability_request,
+                telemetry_mode="scrub",
+                decorate_with_telemetry=False,
+                internal=True,
+            )
 
     async def _actor_id_for(
         self,
@@ -191,6 +207,7 @@ class AnalyticsRecorder:
         error: Any = None,
         client_info: McpClientInfo | None = None,
         workflow_run_id: str | None = None,
+        capability_request: bool = False,
     ) -> None:
         # Single choke point for capture-off and field ownership
         # (TELEMETRY-CONTRACT.md): telemetry handed in by any path —
@@ -242,6 +259,7 @@ class AnalyticsRecorder:
             started_at=started,
             finished_at=finished,
             workflow_run_id=effective_workflow_run_id,
+            capability_request=capability_request,
             redact=_config_value(self.config, "redact", "redact"),
         )
         await self._emitter.emit_batch(
@@ -308,13 +326,37 @@ class AnalyticsRecorder:
             pass
         return result
 
-    def tool(self, registration: ToolRegistration, handler: Any):
+    def _register_tool(
+        self,
+        registration: ToolRegistration,
+        handler: Any,
+        *,
+        telemetry_mode: TelemetryMode,
+        decorate_with_telemetry: bool,
+        internal: bool = False,
+    ) -> None:
         name = registration["name"]
-        schema = registration.get("inputSchema", registration.get("input_schema"))
         self._tools[name] = _RegisteredTool(
             registration=registration,
             handler=handler,
+            telemetry_mode=telemetry_mode,
+            decorate_with_telemetry=decorate_with_telemetry,
+            internal=internal,
+        )
+
+    def tool(self, registration: ToolRegistration, handler: Any):
+        name = registration["name"]
+        if request_capability_enabled(self.config) and name == REQUEST_CAPABILITY_TOOL_NAME:
+            raise ValueError(
+                "Tool name 'request_capability' is reserved while "
+                "armature.request_capability is enabled."
+            )
+        schema = registration.get("inputSchema", registration.get("input_schema"))
+        self._register_tool(
+            registration,
+            handler,
             telemetry_mode=plan_tool_telemetry(name, schema, self.config).mode,
+            decorate_with_telemetry=True,
         )
 
         async def dispatch_registered(raw_args: Any, context: dict[str, Any] | None = None) -> Any:
@@ -344,12 +386,13 @@ class AnalyticsRecorder:
                 "request_id": context.get("requestId") or context.get("request_id"),
                 "client_info": context.get("clientInfo") or context.get("client_info"),
                 "workflow_run_id": context.get("workflowRunId") or context.get("workflow_run_id"),
+                "capability_request": tool.internal,
             },
             handler,
         )
 
     def tool_definitions(self) -> list[dict[str, Any]]:
-        defs = []
+        defs: list[dict[str, Any]] = []
         for tool in self._tools.values():
             registration = tool.registration
             definition = {"name": registration["name"]}
@@ -358,8 +401,11 @@ class AnalyticsRecorder:
                     definition[key] = registration[key]
             if "input_schema" in registration:
                 definition["inputSchema"] = registration["input_schema"]
-            defs.append(definition)
-        return self.decorate_definitions(defs)
+            if tool.decorate_with_telemetry:
+                defs.extend(self.decorate_definitions([definition]))
+            else:
+                defs.append(definition)
+        return defs
 
     def has_tool(self, name: str) -> bool:
         return name in self._tools

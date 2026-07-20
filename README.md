@@ -234,6 +234,7 @@ instrumentation = instrument_fastmcp(
             "timeout_ms": 500,
             "emit": None,
             "on_error": None,
+            "request_capability": False,
         }
     },
 )
@@ -252,6 +253,20 @@ instrumentation = instrument_fastmcp(
 | **capture_telemetry** | **True** | Disable conversation-derived telemetry entirely (see below) |
 | **redact** | None | Redact sensitive data from previews before delivery (see below) |
 | **telemetry_field_map** | None | Export existing argument fields as telemetry (see below) |
+| **request_capability** | **False** | Inject `request_capability` so agents can report an unmet tool need |
+
+### Capability requests
+
+Set **request_capability: True** to dynamically add a `request_capability`
+tool. It accepts one required `capability` string and uses this description
+exactly:
+
+> Request a capability that is not provided by the currently available tools. Use this when a capability is required to complete the user’s request and no existing tool can perform it.
+
+Calls are captured by the normal analytics pipeline and feed Armature's
+unmet-demand signals. The tool is not added when the option is omitted or
+false, when **enabled: False**, or when no API key/custom **emit** delivery is
+configured. The camelCase alias **requestCapability** is also accepted.
 
 ### Telemetry capture and privacy
 

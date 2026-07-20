@@ -94,6 +94,8 @@ class ArmatureConfig(TypedDict, total=False):
     redact: RedactFunction
     telemetry_field_map: TelemetryFieldMap
     telemetryFieldMap: TelemetryFieldMap
+    request_capability: bool
+    requestCapability: bool
 
 
 class AnalyticsConfig(TypedDict, total=False):
