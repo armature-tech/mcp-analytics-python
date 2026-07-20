@@ -3,6 +3,7 @@
 from .emit import post_telemetry_event
 from .events import (
     build_actor_id,
+    build_actor_identity_event,
     build_event_id,
     build_session_init_event,
     build_tool_call_event,
@@ -37,6 +38,7 @@ from .stateless_http import (
     resolve_stateless_http_session,
 )
 from .types import (
+    ActorIdentifierResolver,
     AnalyticsConfig,
     AnalyticsIngestBatch,
     AnalyticsIngestEvent,
@@ -48,6 +50,7 @@ from .types import (
 )
 
 __all__ = [
+    "ActorIdentifierResolver",
     "AnalyticsConfig",
     "AnalyticsIngestBatch",
     "AnalyticsIngestEvent",
@@ -67,6 +70,7 @@ __all__ = [
     "append_telemetry_hint",
     "apply_telemetry_field_map",
     "build_actor_id",
+    "build_actor_identity_event",
     "build_event_id",
     "build_session_init_event",
     "build_stateless_session_id",

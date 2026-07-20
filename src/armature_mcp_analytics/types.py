@@ -68,6 +68,7 @@ class ActorIdResolverInput(TypedDict, total=False):
 
 
 ActorIdResolver = Callable[[ActorIdResolverInput], str | Awaitable[str]]
+ActorIdentifierResolver = Callable[[ActorIdResolverInput], str | Awaitable[str]]
 
 
 class ArmatureConfig(TypedDict, total=False):
@@ -77,6 +78,8 @@ class ArmatureConfig(TypedDict, total=False):
     apiKey: str | None
     actor_id: str | ActorIdResolver
     actorId: str | ActorIdResolver
+    actor_identifier: str | ActorIdentifierResolver
+    actorIdentifier: str | ActorIdentifierResolver
     enabled: bool
     delivery: DeliveryMode
     emit: Callable[["AnalyticsIngestBatch"], Any]
@@ -105,7 +108,7 @@ class AnalyticsConfig(TypedDict, total=False):
 
 class _RequiredAnalyticsIngestEvent(TypedDict):
     event_id: str
-    kind: Literal["tool_call", "session_init"]
+    kind: Literal["tool_call", "session_init", "actor_identity"]
     actor_id: str
     session_id_hint: str | None
     started_at: str

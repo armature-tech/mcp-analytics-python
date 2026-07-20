@@ -61,6 +61,21 @@ async def resolve_actor_seed(config: AnalyticsConfig | None, input: ActorIdResol
     return "anonymous"
 
 
+async def resolve_actor_identifier(
+    config: AnalyticsConfig | None,
+    input: ActorIdResolverInput,
+) -> str | None:
+    configured = _config_value(config, "actor_identifier", "actorIdentifier")
+    if configured is None:
+        return None
+    value = configured(input) if callable(configured) else configured
+    if asyncio.iscoroutine(value) or isinstance(value, asyncio.Future):
+        value = await value
+    if not isinstance(value, str) or not value:
+        return None
+    return value if len(value.encode("utf-8")) <= 8 * 1024 else None
+
+
 async def post_telemetry_event(
     batch: AnalyticsIngestBatch,
     config: AnalyticsConfig | None = None,

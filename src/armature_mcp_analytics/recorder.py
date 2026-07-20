@@ -12,9 +12,10 @@ from .capability import (
     request_capability_enabled,
     request_capability_registration,
 )
-from .emit import _config_value, create_flushable_emitter, resolve_actor_seed
+from .emit import _config_value, create_flushable_emitter, resolve_actor_identifier, resolve_actor_seed
 from .events import (
     build_actor_id,
+    build_actor_identity_event,
     build_batch,
     build_session_init_batch,
     build_tool_call_event,
@@ -95,6 +96,7 @@ class AnalyticsRecorder:
         self._session_init_keys = BoundedKeySet(10_000)
         self._tools: dict[str, _RegisteredTool] = {}
         self._pending_record_tasks: set[asyncio.Task[None]] = set()
+        self._actor_identifiers: dict[str, str] = {}
         if request_capability_enabled(self.config):
             self._register_tool(
                 request_capability_registration(),
@@ -104,7 +106,7 @@ class AnalyticsRecorder:
                 internal=True,
             )
 
-    async def _actor_id_for(
+    async def _analytics_context_for(
         self,
         *,
         ctx: Any = None,
@@ -113,19 +115,28 @@ class AnalyticsRecorder:
         auth_info: JsonDict | None = None,
         tool_name: str | None = None,
         telemetry: TelemetryArgs | None = None,
-    ) -> str:
-        seed = await resolve_actor_seed(
-            self.config,
-            {
-                "ctx": ctx,
-                "extra": extra,
-                "headers": headers or _headers_from_extra(extra),
-                "authInfo": auth_info or (extra or {}).get("authInfo") or {},
-                "toolName": tool_name,
-                "telemetry": telemetry or {},
-            },
-        )
-        return build_actor_id(actor_seed=seed)
+    ) -> tuple[str, str | None]:
+        resolver_input = {
+            "ctx": ctx,
+            "extra": extra,
+            "headers": headers or _headers_from_extra(extra),
+            "authInfo": auth_info or (extra or {}).get("authInfo") or {},
+            "toolName": tool_name,
+            "telemetry": telemetry or {},
+        }
+        identifier = await resolve_actor_identifier(self.config, resolver_input)
+        seed = identifier if identifier is not None else await resolve_actor_seed(self.config, resolver_input)
+        return build_actor_id(actor_seed=seed), identifier
+
+    def _identity_event_for(self, actor_id: str, identifier: str | None, started_at: str):
+        if identifier is None:
+            return None
+        if self._actor_identifiers.get(actor_id) == identifier:
+            return None
+        self._actor_identifiers[actor_id] = identifier
+        if len(self._actor_identifiers) > 10_000:
+            self._actor_identifiers.pop(next(iter(self._actor_identifiers)))
+        return build_actor_identity_event(actor_id=actor_id, identifier=identifier, started_at=started_at)
 
     def _workflow_run_id(self, workflow_run_id: str | None, headers: Any, extra: RequestExtra | None) -> str | None:
         return workflow_run_id or workflow_run_id_from_headers(headers or _headers_from_extra(extra))
@@ -174,7 +185,9 @@ class AnalyticsRecorder:
             client_info = parse_stateless_session_client_info(normalized_session_id)
         if not normalized_session_id:
             return
-        actor_id = await self._actor_id_for(ctx=ctx, extra=extra, headers=headers, auth_info=auth_info)
+        actor_id, actor_identifier = await self._analytics_context_for(
+            ctx=ctx, extra=extra, headers=headers, auth_info=auth_info
+        )
         started = normalize_started_at(started_at)
         batch = build_session_init_batch(
             actor_id=actor_id,
@@ -184,6 +197,7 @@ class AnalyticsRecorder:
             session_init_keys=self._session_init_keys,
             client_info=client_info,
             workflow_run_id=self._workflow_run_id(workflow_run_id, headers, extra),
+            identity_event=self._identity_event_for(actor_id, actor_identifier, started),
         )
         if batch:
             await self._emitter.emit_batch(batch)
@@ -229,7 +243,7 @@ class AnalyticsRecorder:
         else:
             telemetry = None
 
-        actor_id = await self._actor_id_for(
+        actor_id, actor_identifier = await self._analytics_context_for(
             ctx=ctx,
             extra=extra,
             headers=headers,
@@ -271,6 +285,7 @@ class AnalyticsRecorder:
                 session_init_keys=self._session_init_keys,
                 client_info=client_info,
                 workflow_run_id=effective_workflow_run_id,
+                identity_event=self._identity_event_for(actor_id, actor_identifier, started),
             )
         )
 

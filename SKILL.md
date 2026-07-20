@@ -204,6 +204,13 @@ Pass stable session and client context when the server has it. Do not mint a new
 random session id on each stateless HTTP request; that makes the dashboard show
 one anonymous session per call.
 
+### Optional actor identifier
+
+Use `armature.actor_identifier` to attach any caller-provided non-empty string
+up to 8 KiB. The value is hashed into `actor_id`, stored verbatim, and emitted
+only when it changes. `actor_id` remains the hashed-only fallback when this is
+absent.
+
 ## Step 6: Verify the wiring
 
 Two checks. Do not skip them.

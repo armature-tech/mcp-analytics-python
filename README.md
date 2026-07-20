@@ -228,7 +228,7 @@ instrumentation = instrument_fastmcp(
         "armature": {
             "endpoint_url": "https://app.armature.tech/api/mcp-analytics/ingest",
             "api_key": "...",
-            "actor_id": "stable-user-or-tenant-seed",
+            "actor_identifier": lambda input: "anything-at-all@example.com",
             "enabled": True,
             "delivery": "await",
             "timeout_ms": 500,
@@ -245,6 +245,7 @@ instrumentation = instrument_fastmcp(
 | **endpoint_url** | Armature cloud | Override the ingestion endpoint |
 | **api_key** | **ANALYTICS_INGEST_API_KEY** | Authenticate events and identify the MCP server |
 | **actor_id** | Derived from request auth | Supply a stable user or tenant seed |
+| **actor_identifier** | None | Store a caller-provided identifier verbatim |
 | **enabled** | **True** | Enable or disable instrumentation |
 | **delivery** | **"background"** | Use **"await"** for serverless or short-lived processes |
 | **timeout_ms** | **500** | Set the delivery timeout |
@@ -272,7 +273,7 @@ configured. The camelCase alias **requestCapability** is also accepted.
 
 The SDK injects an optional `telemetry` parameter (`user_intent`, `agent_thinking`, `user_frustration`) into each wrapped tool. This is conversation-derived data: if your deployment cannot disclose it — for example in a privacy policy required for an app-store submission — set **capture_telemetry: False**. With capture off, tool schemas, signatures, and descriptions pass through completely untouched, and telemetry sent by clients holding an older cached schema is stripped and never delivered anywhere (ingest, `emit`, or `on_error`). Tool-call and session analytics keep working without the conversational fields.
 
-Disclosure summary for privacy policies: with capture **on**, the SDK collects tool names, tool call inputs/outputs (size-capped previews), error messages, timing, a one-way hash of the actor seed, client name/version, and the agent-supplied `telemetry` fields above; recipients are your Armature workspace. With capture **off**, the `telemetry` fields are not collected.
+Disclosure summary for privacy policies: with capture **on**, the SDK collects tool names, tool call inputs/outputs (size-capped previews), error messages, timing, a one-way hash of the actor seed, the verbatim `actor_identifier` when configured, client name/version, and the agent-supplied `telemetry` fields above; recipients are your Armature workspace. With capture **off**, the `telemetry` fields are not collected.
 
 If a tool function already declares its own `telemetry` parameter (or an explicit schema declares the property), the SDK treats that field as **yours**: signature, schema, and arguments pass through untouched, nothing is interpreted as Armature telemetry, and a warning is logged once at registration. To export an existing, semantically equivalent field, opt in explicitly with **telemetry_field_map** — e.g. `{"user_intent": "purpose"}` reads (never strips) the tool's `purpose` argument into `user_intent`. Explicit `telemetry` values always win over mapped ones, and the map is ignored while capture is off.
 
@@ -280,7 +281,9 @@ If a tool function already declares its own `telemetry` parameter (or an explici
 
 Before any preview is serialized, the SDK strips binary content automatically: image/audio content-block `data`, resource `blob`s, base64 data URIs, and long base64 strings are replaced with `"[binary removed]"` / `"[base64 removed]"` placeholders. A **redact** callable then runs over the sanitized inputs, outputs, error strings, and telemetry text, and must return the value to serialize. The pipeline is sanitize → redact → stringify → truncate. If the callable raises, the SDK fails closed: the affected payload is replaced with `"[redaction failed]"` and the event still ships.
 
-CamelCase aliases such as **endpointUrl**, **apiKey**, **actorId**, **timeoutMs**, and **onError** are accepted for JavaScript parity.
+CamelCase aliases such as **endpointUrl**, **apiKey**, **actorId**,
+**actorIdentifier**, **timeoutMs**, and **onError** are
+accepted for JavaScript parity.
 
 ### Delivery
 
@@ -305,6 +308,14 @@ instrument_fastmcp(
 ~~~
 
 The seed is hashed before transmission. Armature scopes the resulting actor identifier to your server.
+
+Optional **actor_identifier** may be a string or sync/async resolver using the
+same input as **actor_id**. Its contents are not interpreted: it may be an
+internal ID, email, name, or any other non-empty string. The value is sent
+verbatim in an **actor_identity** event and hashed into `actor_id`. An event is
+emitted only when the value changes. The only additional limit is an 8 KiB cap.
+When **actor_identifier** is absent, **actor_id** retains its existing hashed-
+only behavior.
 
 ## Verify your integration
 

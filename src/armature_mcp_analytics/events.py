@@ -64,6 +64,28 @@ def build_event_id(*, actor_id: str, request_id: str, kind: str) -> str:
     return sha256_hex(f"{actor_id} {kind} {request_id}")
 
 
+def build_actor_identity_event(*, actor_id: str, identifier: str, started_at: str) -> AnalyticsIngestEvent:
+    return {
+        "event_id": build_event_id(actor_id=actor_id, request_id=identifier, kind="actor_identity"),
+        "kind": "actor_identity",
+        "actor_id": actor_id,
+        "session_id_hint": None,
+        "started_at": started_at,
+        "finished_at": started_at,
+        "duration_ms": 0,
+        "ok": True,
+        "error": None,
+        "metadata": {"identifier": identifier},
+        "script_source": None,
+        "script_source_truncated": False,
+        "result_preview": None,
+        "result_truncated": False,
+        "calls": [],
+        "logs": [],
+        "search_calls": [],
+    }
+
+
 def normalize_session_id(
     event_session_id: str | None = None,
     extra: RequestExtra | None = None,
@@ -274,8 +296,11 @@ def build_batch(
     session_init_keys: BoundedKeySet,
     client_info: McpClientInfo | None = None,
     workflow_run_id: str | None = None,
+    identity_event: AnalyticsIngestEvent | None = None,
 ) -> AnalyticsIngestBatch:
     events: list[AnalyticsIngestEvent] = []
+    if identity_event:
+        events.append(identity_event)
     session_id = (extra or {}).get("sessionId")
     if session_id:
         key = f"{actor_id}:{session_id}"
@@ -304,14 +329,16 @@ def build_session_init_batch(
     session_init_keys: BoundedKeySet,
     client_info: McpClientInfo | None = None,
     workflow_run_id: str | None = None,
+    identity_event: AnalyticsIngestEvent | None = None,
 ) -> AnalyticsIngestBatch | None:
     key = f"{actor_id}:{session_id}"
     if key in session_init_keys:
-        return None
+        return {"schema_version": SCHEMA_VERSION, "events": [identity_event]} if identity_event else None  # type: ignore[return-value]
     session_init_keys.add(key)
     return {
         "schema_version": SCHEMA_VERSION,
         "events": [
+            *([identity_event] if identity_event else []),
             build_session_init_event(
                 actor_id=actor_id,
                 session_id=session_id,

@@ -9,6 +9,66 @@ from armature_mcp_analytics.emit import post_telemetry_event
 
 
 class RecorderTests(unittest.TestCase):
+    def test_actor_identifier_is_sent_verbatim_and_emitted_only_on_change(self) -> None:
+        batches = []
+        actor = {"identifier": "Ada <ada@example.com>"}
+        calls = 0
+
+        def identifier(_input):
+            nonlocal calls
+            calls += 1
+            return actor["identifier"]
+
+        recorder = create_analytics_recorder({
+            "armature": {
+                "delivery": "await",
+                "actor_identifier": identifier,
+                "emit": batches.append,
+            }
+        })
+
+        async def run() -> None:
+            for request_id in ("one", "two"):
+                await recorder.record_tool_call(
+                    name="ping", status="ok", session_id="identifier-session", request_id=request_id
+                )
+            actor["identifier"] = "anything-at-all@example.com"
+            await recorder.record_tool_call(
+                name="ping", status="ok", session_id="identifier-session", request_id="three"
+            )
+
+        asyncio.run(run())
+        identity_events = [
+            event for batch in batches for event in batch["events"]
+            if event["kind"] == "actor_identity"
+        ]
+        self.assertEqual(calls, 3)
+        self.assertEqual(len(identity_events), 2)
+        self.assertEqual(identity_events[0]["metadata"]["identifier"], "Ada <ada@example.com>")
+        self.assertEqual(
+            identity_events[0]["actor_id"],
+            events.build_actor_id(actor_seed="Ada <ada@example.com>"),
+        )
+        self.assertEqual(
+            identity_events[1]["actor_id"],
+            events.build_actor_id(actor_seed="anything-at-all@example.com"),
+        )
+
+    def test_actor_identity_is_omitted_without_actor_identifier(self) -> None:
+        batches = []
+        recorder = create_analytics_recorder({
+            "armature": {
+                "delivery": "await",
+                "actor_id": "actor-without-identifier",
+                "emit": batches.append,
+            }
+        })
+        asyncio.run(recorder.record_tool_call(name="ping", status="ok"))
+        self.assertFalse(any(
+            event["kind"] == "actor_identity"
+            for batch in batches for event in batch["events"]
+        ))
+
     def test_default_emitter_uses_cloudflare_safe_headers(self) -> None:
         class Response:
             def __enter__(self):
