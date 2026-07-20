@@ -33,6 +33,19 @@ Create a server in the [Armature dashboard](https://app.armature.tech), copy its
 export ANALYTICS_INGEST_API_KEY="..."
 ~~~
 
+### Verify the installation locally
+
+The language-independent doctor can inspect a running Python MCP server:
+
+~~~bash
+npx @armature-tech/mcp-analytics doctor --url http://localhost:3000/mcp
+~~~
+
+It performs an MCP handshake, verifies every served tool exposes Armature's
+telemetry contract, and authenticates the configured ingest key with an empty
+batch containing no sessions or customer content. Use `--skip-ingest` for an
+offline-only check and `--json` for a machine-readable report.
+
 ### 3. Instrument FastMCP
 
 Call **instrument_fastmcp** before registering your tools:

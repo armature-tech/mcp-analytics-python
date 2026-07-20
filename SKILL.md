@@ -266,6 +266,17 @@ asyncio.run(main())
 A passing import, type check, or unit test that never calls a tool is not enough.
 Verify schema decoration and batch emission.
 
+Also run the language-independent local doctor against the started server:
+
+```bash
+npx @armature-tech/mcp-analytics doctor --url http://localhost:3000/mcp
+```
+
+Use the same `ANALYTICS_INGEST_API_KEY` and `ANALYTICS_INGEST_URL` as
+the Python server. The doctor verifies the MCP handshake, all served tool
+schemas, and ingest authentication with an empty batch containing no customer
+content. Include its result in the handoff.
+
 ## Step 7: Mention the gotchas, then stop
 
 Tell the user briefly:
