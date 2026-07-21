@@ -246,7 +246,12 @@ class StatelessHttpSessionMiddleware:
                 message = messages[index]
                 index += 1
                 return message
-            return {"type": "http.disconnect"}
+            # Past the recorded body, defer to the live channel. Returning a
+            # synthetic http.disconnect here kills SSE responses: the official
+            # SDK's streamable-http transport watches receive() for client
+            # disconnect while streaming, and an instant disconnect aborts the
+            # response before anything is written.
+            return await receive()
 
         pending_start: JsonDict | None = None
         pending_body: list[JsonDict] = []

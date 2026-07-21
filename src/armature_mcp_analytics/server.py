@@ -181,11 +181,13 @@ def _headers_from_context(mapping: dict[str, Any]) -> Any:
     return None
 
 
-# Import-once cache for fastmcp's request-context accessors. The lookup runs
-# on every tool call; re-importing (or re-raising ImportError when fastmcp is
-# absent) per call would be needless overhead on hot paths.
+# Import-once caches for the request-context accessors of both FastMCP
+# flavors. The lookup runs on every tool call; re-importing (or re-raising
+# ImportError when the package is absent) per call would be needless overhead
+# on hot paths.
 _FASTMCP_DEPS_UNSET = object()
 _fastmcp_deps: Any = _FASTMCP_DEPS_UNSET
+_official_sdk_request_ctx: Any = _FASTMCP_DEPS_UNSET
 
 
 def _load_fastmcp_deps() -> Any:
@@ -198,6 +200,18 @@ def _load_fastmcp_deps() -> Any:
         except Exception:
             _fastmcp_deps = None
     return _fastmcp_deps
+
+
+def _load_official_sdk_request_ctx() -> Any:
+    global _official_sdk_request_ctx
+    if _official_sdk_request_ctx is _FASTMCP_DEPS_UNSET:
+        try:
+            from mcp.server.lowlevel.server import request_ctx
+
+            _official_sdk_request_ctx = request_ctx
+        except Exception:
+            _official_sdk_request_ctx = None
+    return _official_sdk_request_ctx
 
 
 def _http_headers_via_fastmcp() -> Any:
@@ -249,6 +263,50 @@ def _http_headers_via_fastmcp() -> Any:
         return {}
 
 
+def _http_headers_via_official_sdk() -> Any:
+    # Servers built on the official SDK's FastMCP (`mcp.server.fastmcp`) never
+    # set fastmcp's request contextvar — and the standalone package is usually
+    # not installed at all. Without this path every HTTP request on such a
+    # server fell through to the process-scoped stdio session id, merging all
+    # concurrent conversations served by one warm process into a single
+    # session. The official SDK's lowlevel server exposes the same boundary
+    # via its `request_ctx` contextvar: `RequestContext.request` is the
+    # Starlette Request on streamable-http/SSE transports and None over stdio.
+    request_ctx = _load_official_sdk_request_ctx()
+    if request_ctx is None:
+        return None
+    try:
+        context = request_ctx.get()
+    except Exception:
+        # LookupError: no active MCP request at all (in-process call) — the
+        # stdio fallback stays available.
+        return None
+    headers = getattr(getattr(context, "request", None), "headers", None)
+    if headers is None:
+        # An MCP request without an HTTP request object IS the stdio case.
+        return None
+    try:
+        # Starlette's Headers.get is case-insensitive. Mirror the fastmcp
+        # branch: surface only the session header the recorder consumes.
+        session_id = headers.get("mcp-session-id")
+    except Exception:
+        # We KNOW an HTTP request is active; never degrade to the stdio
+        # fallback just because header extraction failed.
+        return {}
+    return {} if session_id is None else {"mcp-session-id": session_id}
+
+
+def _http_headers_from_transport() -> Any:
+    # fastmcp first: when it is the serving framework its accessor sees the
+    # request. A None there means "fastmcp absent or no fastmcp HTTP request",
+    # which is exactly when an official-SDK server still has an HTTP context
+    # of its own to consult.
+    headers = _http_headers_via_fastmcp()
+    if headers is not None:
+        return headers
+    return _http_headers_via_official_sdk()
+
+
 def _context_from_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
     extra = kwargs.get("extra") or kwargs.get("ctx") or kwargs.get("context")
     context: dict[str, Any] = {}
@@ -275,7 +333,7 @@ def _context_from_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[st
         if headers is not None:
             context["headers"] = headers
     if "headers" not in context:
-        http_headers = _http_headers_via_fastmcp()
+        http_headers = _http_headers_from_transport()
         # `is not None`, deliberately: an empty dict still means "an HTTP
         # request is active" and must keep the stdio fallback disarmed.
         if http_headers is not None:
