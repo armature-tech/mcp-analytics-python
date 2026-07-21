@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
+import json
 import os
 import unittest
+from pathlib import Path
 
 from armature_mcp_analytics import instrument_fastmcp
 from armature_mcp_analytics.schema import (
@@ -366,6 +369,54 @@ class FastMCPAdapterTests(unittest.TestCase):
         asyncio.run(instrumentation.recorder.flush())
         tool_call = [event for batch in batches for event in batch["events"] if event["kind"] == "tool_call"][0]
         self.assertEqual(tool_call["metadata"]["user_intent"], "official SDK")
+
+    def test_official_sdk_output_schema_and_structured_content_unchanged(self) -> None:
+        # QA-03 wrapper-safety guarantee: customer-owned result shapes remain
+        # unchanged. The fixture defines its tools under `from __future__
+        # import annotations`, so every annotation is a string that only
+        # resolves in the fixture module's namespace — the official SDK
+        # returns a precomputed __signature__ verbatim without evaluating
+        # those strings, which used to degrade a dict return's outputSchema
+        # to a {"result": ...} wrapper and a BaseModel return's to nothing.
+        try:
+            from mcp.server.fastmcp import FastMCP
+        except ImportError:
+            self.skip_missing_dependency("mcp")
+
+        fixture_path = Path(__file__).resolve().parent / "fixtures" / "future_annotations_tools.py"
+        spec = importlib.util.spec_from_file_location("armature_future_annotations_fixture", fixture_path)
+        fixture = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixture)
+
+        def build(instrument: bool) -> FastMCP:
+            mcp = FastMCP("schema-parity")
+            if instrument:
+                instrument_fastmcp(mcp, {"armature": {"delivery": "await", "emit": lambda batch: None}})
+            mcp.tool()(fixture.get_customer)
+            mcp.tool()(fixture.get_customer_model)
+            return mcp
+
+        async def snapshot(mcp: FastMCP) -> dict[str, dict[str, str]]:
+            snapshots: dict[str, dict[str, str]] = {}
+            for tool in await mcp.list_tools():
+                result = await mcp.call_tool(tool.name, {"customer_id": "cust_acme"})
+                structured = result[1] if isinstance(result, tuple) else None
+                snapshots[tool.name] = {
+                    "outputSchema": json.dumps(tool.outputSchema, sort_keys=True),
+                    "structuredContent": json.dumps(structured, sort_keys=True),
+                }
+            return snapshots
+
+        baseline = asyncio.run(snapshot(build(False)))
+        instrumented_server = build(True)
+        instrumented = asyncio.run(snapshot(instrumented_server))
+
+        self.assertEqual(set(baseline), {"get_customer", "get_customer_model"})
+        self.assertEqual(instrumented, baseline)
+        # The injected telemetry parameter belongs to the input schema only.
+        for tool in asyncio.run(instrumented_server.list_tools()):
+            self.assertIn("telemetry", tool.inputSchema.get("properties", {}))
+            self.assertNotIn("telemetry", (tool.outputSchema or {}).get("properties", {}))
 
 
 if __name__ == "__main__":

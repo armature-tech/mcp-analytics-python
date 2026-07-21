@@ -111,10 +111,33 @@ def _capability_annotation() -> Any:
     ]
 
 
-def _signature_with_telemetry(func: Any, config: AnalyticsConfig | None = None) -> inspect.Signature | None:
+def _resolved_signature(func: Any) -> inspect.Signature | None:
+    # `from __future__ import annotations` in the customer's module leaves
+    # every annotation as a string. The official SDK resolves those with
+    # `inspect.signature(func, eval_str=True)` — but a precomputed
+    # `__signature__` is returned verbatim, strings and all, so any signature
+    # we attach to the wrapper must already carry evaluated annotations.
+    # Otherwise the SDK's return-type detection sees a string, misclassifies
+    # dict/BaseModel returns, and advertises a fallback outputSchema that
+    # wraps results in {"result": ...} — changing customer-owned result
+    # shapes, which the V1 wrapper-safety guarantee forbids (QA-03).
     try:
-        signature = inspect.signature(func)
+        return inspect.signature(func, eval_str=True)
     except (TypeError, ValueError):
+        return None
+    except Exception:
+        # eval_str is all-or-nothing (e.g. NameError on a TYPE_CHECKING-only
+        # name). Fall back to the unresolved signature rather than failing
+        # tool registration.
+        try:
+            return inspect.signature(func)
+        except (TypeError, ValueError):
+            return None
+
+
+def _signature_with_telemetry(func: Any, config: AnalyticsConfig | None = None) -> inspect.Signature | None:
+    signature = _resolved_signature(func)
+    if signature is None:
         return None
     if "telemetry" in signature.parameters:
         return signature
@@ -467,9 +490,18 @@ def instrument_fastmcp(server: Any, config: AnalyticsConfig | None = None) -> Fa
                 wrapped_signature = _signature_with_telemetry(func, config)
                 if wrapped_signature is not None:
                     wrapped.__signature__ = wrapped_signature
-                    telemetry_parameter = wrapped_signature.parameters.get("telemetry")
-                    if telemetry_parameter is not None and telemetry_parameter.annotation is not inspect.Parameter.empty:
-                        wrapped.__annotations__ = {**getattr(wrapped, "__annotations__", {}), "telemetry": telemetry_parameter.annotation}
+                    # Mirror the resolved signature into __annotations__ too:
+                    # functools.wraps copied the customer function's dict,
+                    # which under future annotations holds strings that would
+                    # resolve against *our* module globals, not the customer's.
+                    annotations = {
+                        parameter_name: parameter.annotation
+                        for parameter_name, parameter in wrapped_signature.parameters.items()
+                        if parameter.annotation is not inspect.Parameter.empty
+                    }
+                    if wrapped_signature.return_annotation is not inspect.Signature.empty:
+                        annotations["return"] = wrapped_signature.return_annotation
+                    wrapped.__annotations__ = annotations
             # Marker must be set after _wrap_handler: functools.wraps copies
             # func.__dict__ onto wrapped, which would otherwise clobber it.
             setattr(wrapped, _ARMATURE_WRAPPED_MARKER, True)
