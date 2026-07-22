@@ -64,7 +64,13 @@ async def main() -> None:
             break
         await asyncio.sleep(2)
     if len(matches) != 2:
-        raise SystemExit(f"expected two platform sessions for {marker}, found {len(matches)}")
+        hint = (
+            " (ingest succeeded, so zero visible sessions usually means the canary organization is"
+            " subject to a free-tier session-visibility cap; keep the canary org on a non-free plan)"
+            if not matches
+            else ""
+        )
+        raise SystemExit(f"expected two platform sessions for {marker}, found {len(matches)}{hint}")
     if len({session["session_key"] for session in matches}) != 2 or len({session["actor_id"] for session in matches}) != 1:
         raise SystemExit("platform merged actors or sessions incorrectly")
     for session in matches:
