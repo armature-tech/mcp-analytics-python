@@ -440,11 +440,13 @@ class AnalyticsRecorder:
         for tool in self._tools.values():
             registration = tool.registration
             definition = {"name": registration["name"]}
-            for key in ("title", "description", "inputSchema"):
+            for key in ("title", "description", "inputSchema", "outputSchema", "annotations"):
                 if key in registration:
                     definition[key] = registration[key]
             if "input_schema" in registration:
                 definition["inputSchema"] = registration["input_schema"]
+            if "output_schema" in registration:
+                definition["outputSchema"] = registration["output_schema"]
             if tool.decorate_with_telemetry:
                 defs.extend(self.decorate_definitions([definition]))
             else:

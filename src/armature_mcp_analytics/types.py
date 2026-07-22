@@ -165,3 +165,6 @@ class ToolRegistration(TypedDict, total=False):
     description: str
     inputSchema: Any
     input_schema: Any
+    outputSchema: Any
+    output_schema: Any
+    annotations: Any

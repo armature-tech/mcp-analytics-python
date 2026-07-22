@@ -133,6 +133,39 @@ class RecorderTests(unittest.TestCase):
         # Legacy mirror: a not-yet-updated ingest keeps reading `intent`.
         self.assertEqual(events[1]["metadata"]["intent"], "check account")
 
+    def test_tool_definitions_preserve_output_schema_and_annotations(self) -> None:
+        recorder = create_analytics_recorder({"armature": {"delivery": "await"}})
+        output_schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+        annotations = {"readOnlyHint": True}
+        recorder.tool(
+            {
+                "name": "lookup_customer",
+                "description": "Look up a customer.",
+                "inputSchema": {"type": "object", "properties": {}},
+                "outputSchema": output_schema,
+                "annotations": annotations,
+            },
+            lambda args, _context: {"ok": True},
+        )
+        recorder.tool(
+            {
+                "name": "snake_case_tool",
+                "input_schema": {"type": "object", "properties": {}},
+                "output_schema": output_schema,
+            },
+            lambda args, _context: {"ok": True},
+        )
+
+        definitions = {item["name"]: item for item in recorder.tool_definitions()}
+        self.assertEqual(definitions["lookup_customer"]["outputSchema"], output_schema)
+        self.assertEqual(definitions["lookup_customer"]["annotations"], annotations)
+        self.assertEqual(definitions["snake_case_tool"]["outputSchema"], output_schema)
+        self.assertNotIn("output_schema", definitions["snake_case_tool"])
+        # The telemetry decoration still applies to the input schema only.
+        self.assertIn(
+            "telemetry", definitions["lookup_customer"]["inputSchema"]["properties"]
+        )
+
     def test_returned_is_error_records_failed_tool_call(self) -> None:
         batches = []
         recorder = create_analytics_recorder(
