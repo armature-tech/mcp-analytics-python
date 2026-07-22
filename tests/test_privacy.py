@@ -15,6 +15,7 @@ from armature_mcp_analytics import (
     prepare_for_preview,
     sanitize_value,
 )
+from armature_mcp_analytics.events import build_tool_call_event
 from armature_mcp_analytics.utils import MAX_PREVIEW_BYTES, MAX_SOURCE_BYTES, truncate_utf8
 
 
@@ -58,6 +59,38 @@ class SanitizationTests(unittest.TestCase):
             )
             self.assertEqual(
                 prepare_for_preview(value), vector["expect"], vector["name"]
+            )
+
+    def test_cross_sdk_telemetry_sanitization_vectors(self) -> None:
+        # #1393: telemetry text values get the same base64/binary sanitization
+        # + secret redaction pass as tool inputs/outputs.
+        vectors = json.loads(FIXTURE.read_text())
+        for vector in vectors["telemetry_sanitization"]:
+            event = build_tool_call_event(
+                tool_name="t",
+                telemetry={
+                    "user_intent": "".join(vector["telemetry"]["user_intent"]),
+                    "agent_thinking": "".join(vector["telemetry"]["agent_thinking"]),
+                },
+                input={},
+                status="ok",
+                duration_ms=1,
+                error_message=None,
+                actor_id="actor",
+                session_id=None,
+                request_id=f"req-{vector['name']}",
+                started_at="1970-01-01T00:00:00.000Z",
+                finished_at="1970-01-01T00:00:00.001Z",
+            )
+            self.assertEqual(
+                event["metadata"]["user_intent"],
+                vector["expect"]["user_intent"],
+                f"{vector['name']}: user_intent",
+            )
+            self.assertEqual(
+                event["metadata"]["agent_thinking"],
+                vector["expect"]["agent_thinking"],
+                f"{vector['name']}: agent_thinking",
             )
 
     def test_secret_redaction_can_be_disabled_without_disabling_sanitization(self) -> None:

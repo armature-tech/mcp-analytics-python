@@ -148,6 +148,17 @@ def _cap_capabilities(capabilities: Any) -> dict[str, Any] | None:
     return capabilities
 
 
+# Telemetry text values get the same treatment as tool inputs/outputs:
+# base64/binary sanitization (always) plus built-in secret redaction (when
+# enabled). Previously these fields only saw redact_secrets_in_string, so a
+# whole-value or embedded >=512-char base64 blob reached the ingest body
+# verbatim (#1393). The legacy ``redact`` hook still runs once over the whole
+# telemetry object in _prepare_telemetry, so it is not passed here.
+def _sanitize_telemetry_text(value: str, redact_secrets: bool) -> str:
+    prepared = prepare_for_preview(value, None, redact_secrets=redact_secrets)
+    return prepared if isinstance(prepared, str) else stringify_preview(prepared)
+
+
 def _prepare_telemetry(
     telemetry: TelemetryArgs | None,
     redact: RedactFunction | None,
@@ -159,13 +170,13 @@ def _prepare_telemetry(
     protected: TelemetryArgs = {
         **normalized,
         **(
-            {"user_intent": redact_secrets_in_string(normalized["user_intent"])}
-            if redact_secrets and isinstance(normalized.get("user_intent"), str)
+            {"user_intent": _sanitize_telemetry_text(normalized["user_intent"], redact_secrets)}
+            if isinstance(normalized.get("user_intent"), str)
             else {}
         ),
         **(
-            {"agent_thinking": redact_secrets_in_string(normalized["agent_thinking"])}
-            if redact_secrets and isinstance(normalized.get("agent_thinking"), str)
+            {"agent_thinking": _sanitize_telemetry_text(normalized["agent_thinking"], redact_secrets)}
+            if isinstance(normalized.get("agent_thinking"), str)
             else {}
         ),
     }
