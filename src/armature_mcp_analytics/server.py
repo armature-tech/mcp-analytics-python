@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import logging
 from dataclasses import dataclass
 from typing import Annotated, Any
 
@@ -135,7 +136,17 @@ def _resolved_signature(func: Any) -> inspect.Signature | None:
             return None
 
 
-def _signature_with_telemetry(func: Any, config: AnalyticsConfig | None = None) -> inspect.Signature | None:
+def _is_standalone_fastmcp(server: Any) -> bool:
+    module = getattr(type(server), "__module__", "") or ""
+    return module == "fastmcp" or module.startswith("fastmcp.")
+
+
+def _signature_with_telemetry(
+    func: Any,
+    config: AnalyticsConfig | None = None,
+    *,
+    annotation: Any = None,
+) -> inspect.Signature | None:
     signature = _resolved_signature(func)
     if signature is None:
         return None
@@ -146,7 +157,7 @@ def _signature_with_telemetry(func: Any, config: AnalyticsConfig | None = None) 
         "telemetry",
         inspect.Parameter.KEYWORD_ONLY,
         default=None,
-        annotation=_telemetry_annotation(config),
+        annotation=annotation if annotation is not None else _telemetry_annotation(config),
     )
     parameters = list(signature.parameters.values())
     insert_at = len(parameters)
@@ -440,6 +451,76 @@ class FastMCPInstrumentation:
     recorder: AnalyticsRecorder
 
 
+def _advertised_parameters_named(server: Any, registered: Any, name: str) -> list[dict[str, Any]]:
+    # Every place a fastmcp release stores the registered tool's advertised
+    # JSON schema: the registration return value (2.x returns the
+    # FunctionTool), the tool-manager dicts (2.x), and the local provider's
+    # component map (3.x). All hold the same mutable `parameters` dict that
+    # later tools/list responses serialize.
+    candidates: list[Any] = [registered]
+    for holder in (server, getattr(server, "_tool_manager", None)):
+        if holder is None:
+            continue
+        for attribute in ("tools", "_tools"):
+            tools = getattr(holder, attribute, None)
+            if isinstance(tools, dict):
+                candidates.append(tools.get(name))
+    try:
+        components = getattr(getattr(server, "local_provider", None), "_components", None)
+    except Exception:
+        components = None
+    if isinstance(components, dict):
+        candidates.extend(
+            component
+            for component in components.values()
+            if getattr(component, "name", None) == name
+        )
+    found: list[dict[str, Any]] = []
+    for candidate in candidates:
+        parameters = getattr(candidate, "parameters", None)
+        if isinstance(parameters, dict) and not any(parameters is item for item in found):
+            found.append(parameters)
+    return found
+
+
+def _remove_scrub_telemetry_from_schema(server: Any, registered: Any, name: str) -> None:
+    # Scrub mode advertises the customer's schema untouched; the wrapper's
+    # `telemetry` parameter exists only so the call model keeps accepting the
+    # argument that clients holding the previously advertised injected schema
+    # still send (mcp-tester#1391). fastmcp derives the advertised schema from
+    # the same signature at registration, so strip the property back out of
+    # the stored schema. Call validation runs against the signature-derived
+    # model, not this dict, so acceptance is unaffected.
+    pruned = False
+    for parameters in _advertised_parameters_named(server, registered, name):
+        properties = parameters.get("properties")
+        if isinstance(properties, dict) and "telemetry" in properties:
+            properties.pop("telemetry")
+            pruned = True
+        required = parameters.get("required")
+        if isinstance(required, list) and "telemetry" in required:
+            required.remove("telemetry")
+    if not pruned:
+        _warn_scrub_prune_miss(name)
+
+
+# One warning per tool name per process, mirroring warn_telemetry_collision:
+# registration re-runs on serverless factory paths.
+_warned_scrub_prune_misses: set[str] = set()
+
+
+def _warn_scrub_prune_miss(tool_name: str) -> None:
+    if tool_name in _warned_scrub_prune_misses:
+        return
+    _warned_scrub_prune_misses.add(tool_name)
+    logging.getLogger("armature_mcp_analytics").warning(
+        "capture_telemetry is off but the advertised schema for tool %r could "
+        "not be located to strip the internal telemetry parameter; tools/list "
+        "may expose an undocumented optional 'telemetry' property.",
+        tool_name,
+    )
+
+
 def _server_has_tool_named(server: Any, name: str) -> bool:
     candidates = [server, getattr(server, "_tool_manager", None)]
     for candidate in candidates:
@@ -544,22 +625,38 @@ def instrument_fastmcp(server: Any, config: AnalyticsConfig | None = None) -> Fa
                 kwargs = _set_schema_kwargs(decorator_kwargs, schema, supports_schema_kwargs=supports_schema_kwargs)
                 kwargs["description"] = append_telemetry_hint(_description_from(func, decorator_kwargs))
             wrapped = _wrap_handler(recorder, str(name), func, telemetry_mode)
+            wrapped_signature: inspect.Signature | None = None
+            scrub_signature_attached = False
             if telemetry_mode == "injected":
                 wrapped_signature = _signature_with_telemetry(func, config)
-                if wrapped_signature is not None:
-                    wrapped.__signature__ = wrapped_signature
-                    # Mirror the resolved signature into __annotations__ too:
-                    # functools.wraps copied the customer function's dict,
-                    # which under future annotations holds strings that would
-                    # resolve against *our* module globals, not the customer's.
-                    annotations = {
-                        parameter_name: parameter.annotation
-                        for parameter_name, parameter in wrapped_signature.parameters.items()
-                        if parameter.annotation is not inspect.Parameter.empty
-                    }
-                    if wrapped_signature.return_annotation is not inspect.Signature.empty:
-                        annotations["return"] = wrapped_signature.return_annotation
-                    wrapped.__annotations__ = annotations
+            elif telemetry_mode == "scrub" and _is_standalone_fastmcp(server):
+                # fastmcp builds its call-validation model from the wrapper
+                # signature, so a bare customer signature makes pydantic
+                # reject the `telemetry` argument that clients holding the
+                # previously advertised injected schema still send — before
+                # the recorder can strip it (mcp-tester#1391). Accept the
+                # argument at the call boundary; the schema it leaks into is
+                # stripped back out right after registration below. The
+                # official SDK's arg model already tolerates the extra
+                # argument, so only fastmcp needs this.
+                wrapped_signature = _signature_with_telemetry(
+                    func, config, annotation=dict[str, Any] | None
+                )
+                scrub_signature_attached = wrapped_signature is not None
+            if wrapped_signature is not None:
+                wrapped.__signature__ = wrapped_signature
+                # Mirror the resolved signature into __annotations__ too:
+                # functools.wraps copied the customer function's dict,
+                # which under future annotations holds strings that would
+                # resolve against *our* module globals, not the customer's.
+                annotations = {
+                    parameter_name: parameter.annotation
+                    for parameter_name, parameter in wrapped_signature.parameters.items()
+                    if parameter.annotation is not inspect.Parameter.empty
+                }
+                if wrapped_signature.return_annotation is not inspect.Signature.empty:
+                    annotations["return"] = wrapped_signature.return_annotation
+                wrapped.__annotations__ = annotations
             # Marker must be set after _wrap_handler: functools.wraps copies
             # func.__dict__ onto wrapped, which would otherwise clobber it.
             setattr(wrapped, _ARMATURE_WRAPPED_MARKER, True)
@@ -567,6 +664,8 @@ def instrument_fastmcp(server: Any, config: AnalyticsConfig | None = None) -> Fa
             if registration_args and callable(registration_args[0]) and len(registration_args) == 1:
                 registration_args = ()
             registered = original_tool(*registration_args, **kwargs)(wrapped)
+            if scrub_signature_attached:
+                _remove_scrub_telemetry_from_schema(server, registered, str(name))
             return registered
 
         # Bare `@tool` and direct `tool(fn, name=...)` calls both put the

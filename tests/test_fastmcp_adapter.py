@@ -418,6 +418,137 @@ class FastMCPAdapterTests(unittest.TestCase):
             self.assertIn("telemetry", tool.inputSchema.get("properties", {}))
             self.assertNotIn("telemetry", (tool.outputSchema or {}).get("properties", {}))
 
+    def test_capture_off_tolerates_stale_schema_telemetry_on_fastmcp(self) -> None:
+        # mcp-tester#1391: with capture_telemetry off, clients still holding
+        # the previously advertised injected schema keep sending `telemetry`.
+        # fastmcp validates calls against a pydantic model built from the
+        # wrapper signature, so scrub mode must accept the argument there
+        # while the advertised schema stays byte-identical to baseline and
+        # the value is stripped and never delivered.
+        try:
+            from fastmcp import Client, FastMCP
+        except ImportError:
+            self.skip_missing_dependency("fastmcp")
+
+        batches: list = []
+
+        def build(instrument: bool) -> FastMCP:
+            mcp = FastMCP("capture-off")
+            if instrument:
+                instrument_fastmcp(
+                    mcp,
+                    {
+                        "armature": {
+                            "delivery": "await",
+                            "capture_telemetry": False,
+                            "actor_id": "capture-off-actor",
+                            "emit": batches.append,
+                        }
+                    },
+                )
+
+            @mcp.tool
+            def ping(message: str) -> dict:
+                """Echo a message."""
+                return {"message": message}
+
+            return mcp
+
+        async def advertised(mcp: FastMCP) -> tuple[str, str | None]:
+            async with Client(mcp) as client:
+                tool = (await client.list_tools())[0]
+                return json.dumps(tool.inputSchema, sort_keys=True), tool.description
+
+        baseline_schema, baseline_description = asyncio.run(advertised(build(False)))
+        scrub_server = build(True)
+        scrub_schema, scrub_description = asyncio.run(advertised(scrub_server))
+        self.assertEqual(scrub_schema, baseline_schema)
+        self.assertEqual(scrub_description, baseline_description)
+
+        async def call_with_stale_telemetry() -> None:
+            async with Client(scrub_server) as client:
+                result = await client.call_tool(
+                    "ping",
+                    {"message": "hello", "telemetry": {"user_intent": "stale cached intent"}},
+                    raise_on_error=False,
+                )
+                self.assertFalse(
+                    result.is_error,
+                    f"stale-schema telemetry must not fail the call: {result.content}",
+                )
+                plain = await client.call_tool("ping", {"message": "hello"}, raise_on_error=False)
+                self.assertFalse(plain.is_error)
+
+        asyncio.run(call_with_stale_telemetry())
+        tool_calls = [
+            event
+            for batch in batches
+            for event in batch["events"]
+            if event["kind"] == "tool_call"
+        ]
+        self.assertEqual(len(tool_calls), 2)
+        for event in tool_calls:
+            metadata = event.get("metadata") or {}
+            self.assertIsNone(metadata.get("user_intent"))
+            self.assertNotIn("stale cached intent", json.dumps(event))
+
+    def test_capture_off_tolerates_stale_schema_telemetry_on_official_sdk(self) -> None:
+        # The official SDK's arg model already ignored the extra argument;
+        # pin that so the fastmcp-only signature handling never regresses it.
+        try:
+            from mcp.server.fastmcp import FastMCP
+        except ImportError:
+            self.skip_missing_dependency("mcp")
+
+        batches: list = []
+
+        def build(instrument: bool) -> FastMCP:
+            mcp = FastMCP("capture-off-official")
+            if instrument:
+                instrument_fastmcp(
+                    mcp,
+                    {
+                        "armature": {
+                            "delivery": "await",
+                            "capture_telemetry": False,
+                            "actor_id": "capture-off-actor",
+                            "emit": batches.append,
+                        }
+                    },
+                )
+
+            @mcp.tool()
+            def ping(message: str) -> dict:
+                """Echo a message."""
+                return {"message": message}
+
+            return mcp
+
+        async def advertised(mcp: FastMCP) -> str:
+            tool = (await mcp.list_tools())[0]
+            return json.dumps(tool.inputSchema, sort_keys=True)
+
+        baseline_schema = asyncio.run(advertised(build(False)))
+        scrub_server = build(True)
+        self.assertEqual(asyncio.run(advertised(scrub_server)), baseline_schema)
+
+        result = asyncio.run(
+            scrub_server.call_tool(
+                "ping",
+                {"message": "hello", "telemetry": {"user_intent": "stale cached intent"}},
+            )
+        )
+        self.assertIsNotNone(result)
+        tool_calls = [
+            event
+            for batch in batches
+            for event in batch["events"]
+            if event["kind"] == "tool_call"
+        ]
+        self.assertEqual(len(tool_calls), 1)
+        self.assertIsNone((tool_calls[0].get("metadata") or {}).get("user_intent"))
+        self.assertNotIn("stale cached intent", json.dumps(tool_calls[0]))
+
 
 if __name__ == "__main__":
     unittest.main()
