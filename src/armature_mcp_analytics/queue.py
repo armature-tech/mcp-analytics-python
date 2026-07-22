@@ -8,7 +8,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from .emit import _config_value, post_telemetry_event
+from .emit import _config_value, detect_ingest_rejection, post_telemetry_event
 from .types import AnalyticsConfig, AnalyticsIngestBatch, AnalyticsIngestEvent
 from .utils import SCHEMA_VERSION
 
@@ -68,7 +68,13 @@ class PrivacyQueue:
         try:
             emitter = _config_value(self.config, "emit", "emit")
             if emitter is None:
-                await post_telemetry_event(batch, self.config)
+                response = await post_telemetry_event(batch, self.config)
+                # A 200 can still refuse events in its body; surface that through
+                # on_error, matching a transport failure (#1403). This is the
+                # recorder's real delivery path, so the check must live here too.
+                rejection = detect_ingest_rejection(response, len(batch.get("events") or []))
+                if rejection is not None:
+                    raise rejection
             else:
                 result = emitter(batch)
                 if inspect.isawaitable(result):

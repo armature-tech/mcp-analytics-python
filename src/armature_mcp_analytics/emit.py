@@ -103,13 +103,65 @@ async def post_telemetry_event(
     def send() -> dict[str, Any]:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             status = response.getcode()
-            return {"skipped": False, "ok": True, "status": status}
+            raw = response.read()
+        # Ingest reports in-band rejection/dedup even on 200; parse the body so
+        # the emit path can raise on refused events (#1403). A non-JSON body just
+        # means rejections are unobservable, not a delivery failure.
+        parsed: dict[str, Any] = {}
+        try:
+            parsed = json.loads(raw.decode("utf-8")) if raw else {}
+        except (ValueError, UnicodeDecodeError):
+            parsed = {}
+        if not isinstance(parsed, dict):
+            parsed = {}
+        accepted = parsed.get("accepted")
+        rejected = parsed.get("rejected")
+        duplicate_count = parsed.get("duplicate_count")
+        return {
+            "skipped": False,
+            "ok": True,
+            "status": status,
+            "accepted": accepted if isinstance(accepted, int) else None,
+            "rejected": rejected if isinstance(rejected, list) else [],
+            "duplicate_count": duplicate_count if isinstance(duplicate_count, int) else None,
+        }
 
     try:
         return await asyncio.to_thread(send)
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"Armature ingest failed with {error.code}: {detail}") from error
+
+
+class IngestRejectedError(RuntimeError):
+    """A 200 response that refused events in its body (see #1403)."""
+
+    def __init__(self, rejected: list[Any], accepted: int) -> None:
+        reasons = sorted(
+            {r.get("reason") for r in rejected if isinstance(r, dict) and r.get("reason")}
+        )
+        detail = f" ({', '.join(reasons)})" if reasons else ""
+        super().__init__(f"Armature ingest rejected {len(rejected)} event(s){detail}")
+        self.rejected = rejected
+        self.accepted = accepted
+
+
+def detect_ingest_rejection(result: dict[str, Any] | None, event_count: int) -> IngestRejectedError | None:
+    """Turn a parsed ingest response into an error when it refused events.
+
+    Any explicit rejection, or nothing accepted from a non-empty batch, is a
+    problem. Server-side dedup counts as accepted, so a benign session_init
+    re-delivery does not trip this.
+    """
+    if not result or result.get("skipped"):
+        return None
+    rejected = result.get("rejected") or []
+    accepted = result.get("accepted")
+    if rejected:
+        return IngestRejectedError(rejected, accepted if isinstance(accepted, int) else 0)
+    if accepted == 0 and event_count > 0:
+        return IngestRejectedError([], 0)
+    return None
 
 
 class FlushableEmitter:
@@ -137,7 +189,12 @@ class FlushableEmitter:
                 if asyncio.iscoroutine(result) or isinstance(result, asyncio.Future):
                     await result
             else:
-                await post_telemetry_event(batch, self.config)
+                response = await post_telemetry_event(batch, self.config)
+                # A 200 can still refuse events in its body; surface that through
+                # the same error hook as a transport failure (#1403).
+                rejection = detect_ingest_rejection(response, len(batch.get("events") or []))
+                if rejection is not None:
+                    raise rejection
         except Exception as error:
             # Telemetry delivery should not crash the host MCP server. Await
             # mode waits for the attempt to finish; failures are surfaced only

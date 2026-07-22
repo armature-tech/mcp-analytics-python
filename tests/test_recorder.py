@@ -54,6 +54,89 @@ class RecorderTests(unittest.TestCase):
             events.build_actor_id(actor_seed="anything-at-all@example.com"),
         )
 
+    def test_caller_request_id_is_scoped_by_session(self) -> None:
+        # Shape-C hazard (#1402): a per-connection JSON-RPC id passed as
+        # request_id must not collide across concurrent conversations. Scoping by
+        # session_id makes cross-session ids distinct while a genuine within-
+        # session retry (same id, same session) still de-dups.
+        batches = []
+        recorder = create_analytics_recorder({
+            "armature": {"delivery": "await", "actor_id": "anonymous", "emit": batches.append}
+        })
+
+        async def run() -> None:
+            await recorder.record_tool_call(name="ping", status="ok", session_id="sess-A", request_id="5")
+            await recorder.record_tool_call(name="ping", status="ok", session_id="sess-B", request_id="5")
+            await recorder.record_tool_call(name="ping", status="ok", session_id="sess-A", request_id="5")
+
+        asyncio.run(run())
+        tool_calls = [
+            event for batch in batches for event in batch["events"] if event["kind"] == "tool_call"
+        ]
+        self.assertEqual(len(tool_calls), 3)
+        self.assertNotEqual(
+            tool_calls[0]["event_id"], tool_calls[1]["event_id"],
+            "same request_id across sessions must not collide",
+        )
+        self.assertEqual(
+            tool_calls[0]["event_id"], tool_calls[2]["event_id"],
+            "same request_id within a session must de-dup",
+        )
+
+    def test_normalize_request_id_scoping(self) -> None:
+        # Minted uuid when absent; caller id scoped by session only when present.
+        self.assertNotEqual(events.normalize_request_id(None, "sess"), events.normalize_request_id(None, "sess"))
+        self.assertEqual(events.normalize_request_id("5", "sess-A"), "sess-A#5")
+        self.assertEqual(events.normalize_request_id("5", None), "5")
+
+    def test_recorder_surfaces_in_body_rejection_through_on_error(self) -> None:
+        # The recorder's real delivery path is the privacy queue, not the
+        # flushable emitter. Drive create_analytics_recorder end-to-end so an
+        # in-body rejection on the live path reaches on_error (#1403 regression).
+        # Public-surface import on purpose: integrators identify a refused
+        # batch inside on_error via isinstance, so the class must stay
+        # exported from the package root (#1403 contract, matching TS/Go).
+        from armature_mcp_analytics import IngestRejectedError
+
+        observed = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def getcode(self):
+                return 200
+
+            def read(self):
+                return b'{"accepted":0,"rejected":[{"event_id":"e1","reason":"persist_error"}]}'
+
+        recorder = create_analytics_recorder(
+            {
+                "armature": {
+                    "delivery": "await",
+                    "api_key": "ami_test",
+                    "actor_id": "anonymous",
+                    "on_error": lambda error, _batch: observed.append(error),
+                }
+            }
+        )
+
+        async def run() -> None:
+            with mock.patch(
+                "armature_mcp_analytics.emit.urllib.request.urlopen", return_value=Response()
+            ):
+                await recorder.record_tool_call(
+                    name="lookup_customer", status="ok", session_id="sess-A", request_id="5"
+                )
+                await recorder.flush()
+
+        asyncio.run(run())
+        self.assertTrue(observed, "recorder must report the rejection through on_error")
+        self.assertTrue(any(isinstance(e, IngestRejectedError) for e in observed))
+
     def test_actor_identity_is_omitted_without_actor_identifier(self) -> None:
         batches = []
         recorder = create_analytics_recorder({
@@ -79,6 +162,9 @@ class RecorderTests(unittest.TestCase):
 
             def getcode(self):
                 return 202
+
+            def read(self):
+                return b'{"accepted":0,"rejected":[]}'
 
         with mock.patch(
             "armature_mcp_analytics.emit.urllib.request.urlopen",

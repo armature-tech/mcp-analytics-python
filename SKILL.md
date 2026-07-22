@@ -197,7 +197,6 @@ return await analytics.dispatch(
     raw_args,
     {
         "sessionId": session_id,
-        "requestId": request_id,
         "headers": headers,
         "authInfo": auth_info,
         "clientInfo": client_info,
@@ -208,6 +207,14 @@ return await analytics.dispatch(
 Pass stable session and client context when the server has it. Do not mint a new
 random session id on each stateless HTTP request; that makes the dashboard show
 one anonymous session per call.
+
+**Do not pass the transport request id as `requestId`.** Omit `requestId` and the
+SDK mints a fresh per-call id. `requestId` seeds the event's dedup key, so it must
+be unique per invocation — but the JSON-RPC message id is a per-connection counter
+(0, 1, 2, …) reused across concurrent conversations, so passing it makes anonymous
+sessions collide and ingest silently drops the duplicates. Set `requestId` only
+when you have a genuine per-invocation idempotency key you want retries to de-dup
+on (it is scoped by `sessionId` automatically).
 
 ### Optional actor identifier
 

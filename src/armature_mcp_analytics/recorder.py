@@ -256,7 +256,7 @@ class AnalyticsRecorder:
             client_info = parse_stateless_session_client_info(normalized_session_id)
         error_message = None if error is None else str(error)
         effective_workflow_run_id = self._workflow_run_id(workflow_run_id, headers, extra)
-        normalized_request_id = normalize_request_id(request_id)
+        normalized_request_id = normalize_request_id(request_id, normalized_session_id)
 
         async def finalize() -> list[dict[str, Any]] | None:
             actor_id, actor_identifier = await self._analytics_context_for(

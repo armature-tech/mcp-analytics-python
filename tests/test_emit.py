@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from unittest import mock
 
-from armature_mcp_analytics.emit import create_flushable_emitter
+from armature_mcp_analytics.emit import (
+    IngestRejectedError,
+    create_flushable_emitter,
+    detect_ingest_rejection,
+)
 
 
 class EmitTests(unittest.TestCase):
@@ -57,6 +62,80 @@ class EmitTests(unittest.TestCase):
         asyncio.run(emitter.emit_batch(batch))
 
         self.assertEqual(observed, [("network failed", batch)])
+
+
+    def test_detect_ingest_rejection(self) -> None:
+        # Explicit rejection, all-rejected, clean accept, dedup-only, skipped.
+        self.assertIsInstance(
+            detect_ingest_rejection({"skipped": False, "accepted": 0, "rejected": [{"reason": "persist_error"}]}, 1),
+            IngestRejectedError,
+        )
+        self.assertIsInstance(
+            detect_ingest_rejection({"skipped": False, "accepted": 0, "rejected": []}, 2), IngestRejectedError
+        )
+        self.assertIsNone(detect_ingest_rejection({"skipped": False, "accepted": 3, "rejected": []}, 3))
+        self.assertIsNone(
+            detect_ingest_rejection({"skipped": False, "accepted": 2, "rejected": [], "duplicate_count": 2}, 2)
+        )
+        self.assertIsNone(detect_ingest_rejection({"skipped": True}, 1))
+
+    def test_emit_reports_in_body_rejection_through_on_error(self) -> None:
+        # A 200 whose body rejects events must reach on_error (#1403).
+        observed = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def getcode(self):
+                return 200
+
+            def read(self):
+                return b'{"accepted":0,"rejected":[{"event_id":"e1","reason":"schema_version_mismatch"}]}'
+
+        def on_error(error, _batch) -> None:
+            observed.append(error)
+
+        emitter = create_flushable_emitter(
+            {"armature": {"delivery": "await", "api_key": "ami_test", "on_error": on_error}}
+        )
+        with mock.patch(
+            "armature_mcp_analytics.emit.urllib.request.urlopen", return_value=Response()
+        ):
+            asyncio.run(emitter.emit_batch({"schema_version": 1, "events": [{"event_id": "e1"}]}))
+
+        self.assertEqual(len(observed), 1)
+        self.assertIsInstance(observed[0], IngestRejectedError)
+        self.assertIn("schema_version_mismatch", str(observed[0]))
+
+    def test_emit_stays_quiet_on_clean_accept(self) -> None:
+        observed = []
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def getcode(self):
+                return 200
+
+            def read(self):
+                return b'{"accepted":1,"rejected":[],"duplicate_count":0}'
+
+        emitter = create_flushable_emitter(
+            {"armature": {"delivery": "await", "api_key": "ami_test", "on_error": lambda e, b: observed.append(e)}}
+        )
+        with mock.patch(
+            "armature_mcp_analytics.emit.urllib.request.urlopen", return_value=Response()
+        ):
+            asyncio.run(emitter.emit_batch({"schema_version": 1, "events": [{"event_id": "e1"}]}))
+
+        self.assertEqual(observed, [])
 
 
 if __name__ == "__main__":

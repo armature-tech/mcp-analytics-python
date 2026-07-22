@@ -183,7 +183,7 @@ result = await analytics.dispatch(
 )
 ~~~
 
-Pass stable session, client, request, header, and authentication information in the dispatcher context when it is available.
+Pass stable session, client, header, and authentication information in the dispatcher context when it is available. Do **not** pass the transport request id as `requestId` — the SDK mints a fresh per-call id, and reusing the per-connection JSON-RPC counter makes concurrent conversations collide on the event dedup key (ingest silently drops the duplicates). Set `requestId` only for a genuine per-invocation idempotency key; it is scoped by `sessionId` automatically.
 
 ### Stateless HTTP and serverless
 

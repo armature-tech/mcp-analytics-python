@@ -103,8 +103,27 @@ def normalize_session_id(
     return _trim_or_none(header_value(headers, "mcp-session-id"))
 
 
-def normalize_request_id(event_request_id: str | None = None) -> str:
-    return event_request_id or str(uuid4())
+# The analytics request id seeds `event_id` (see `build_event_id`), so it MUST
+# be unique per tool-call invocation. Do NOT derive it from the MCP JSON-RPC
+# request id (`extra["requestId"]`): that is an in-memory per-connection counter
+# (0, 1, 2, …) that restarts on reconnect and is reused across concurrent
+# conversations, so two unrelated tool calls routinely share it and would
+# collide on `event_id` — making ingest dedupe the second call away.
+#
+# When no id is supplied we mint a fresh uuid (globally unique, no scoping
+# needed). A caller-supplied id is treated as a deliberate idempotency key, but
+# is scoped by the resolved session id when one is known: `f"{session_id}#{id}"`.
+# That keeps within-session idempotency (a genuine retry reusing the same id
+# de-dups) while making a hazardous transport counter reused across sessions
+# collision-free. See the cross-SDK "Event identity and idempotency" section of
+# packages/TELEMETRY-CONTRACT.md.
+def normalize_request_id(
+    event_request_id: str | None = None,
+    session_id: str | None = None,
+) -> str:
+    if not event_request_id:
+        return str(uuid4())
+    return f"{session_id}#{event_request_id}" if session_id else event_request_id
 
 
 # Session identity for transports that have none: stdio servers never see an
