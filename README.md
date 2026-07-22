@@ -44,8 +44,7 @@ npx @armature-tech/mcp-analytics doctor --url http://localhost:3000/mcp
 It performs an MCP handshake, verifies every served tool exposes Armature's
 telemetry contract, and authenticates the configured ingest key with an empty
 batch containing no sessions or customer content. Use `--skip-ingest` for an
-offline-only check and `--json` for a machine-readable report. Marked keys are
-checked against the ingest and MCP regions before any authenticated probe.
+offline-only check and `--json` for a machine-readable report.
 
 ### 3. Instrument FastMCP
 
@@ -248,7 +247,7 @@ instrumentation = instrument_fastmcp(
             "redact_secrets": True,
             "redact_event": None,
             "schedule": None,
-            "timeout_ms": 5000,
+            "timeout_ms": 500,
             "emit": None,
             "on_error": None,
             "request_capability": False,
@@ -259,13 +258,13 @@ instrumentation = instrument_fastmcp(
 
 | Option | Default | Purpose |
 | --- | --- | --- |
-| **endpoint_url** | US Armature cloud | Override the ingestion endpoint; use `https://eu.armature.tech/api/mcp-analytics/ingest` for EU |
+| **endpoint_url** | Armature cloud | Override the ingestion endpoint |
 | **api_key** | **ANALYTICS_INGEST_API_KEY** | Authenticate events and identify the MCP server |
 | **actor_id** | Derived from request auth | Supply a stable user or tenant seed |
 | **actor_identifier** | None | Store a caller-provided identifier verbatim |
 | **enabled** | **True** | Enable or disable instrumentation |
 | **delivery** | **"background"** | Use **"await"** for serverless or short-lived processes |
-| **timeout_ms** | **5000** | Set the timeout for each delivery attempt |
+| **timeout_ms** | **500** | Set the delivery timeout |
 | **emit** | Network emitter | Replace delivery for tests or custom pipelines |
 | **on_error** | None | Observe delivery failures |
 | **capture_telemetry** | **True** | Disable conversation-derived telemetry entirely (see below) |
@@ -275,11 +274,6 @@ instrumentation = instrument_fastmcp(
 | **schedule** | None | Register background work with a serverless lifecycle primitive |
 | **telemetry_field_map** | None | Export existing argument fields as telemetry (see below) |
 | **request_capability** | **False** | Inject `request_capability` so agents can report an unmet tool need |
-
-Network failures, timeouts, `429`, and `5xx` responses are retried once after
-100 ms (two attempts total). Other `4xx` responses are not retried.
-`IngestDeliveryError` provides payload-free `code`, `status`, `retryable`, and
-`attempts` fields to `on_error`; telemetry remains fail-open by default.
 
 ### Capability requests
 
