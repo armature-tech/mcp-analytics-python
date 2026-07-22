@@ -14,6 +14,9 @@ SANITIZATION_BUDGET = 65_536
 _DATA_URI_MIN_CHARS = 64
 _BASE64_MIN_CHARS = 512
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/_-]+={0,2}$")
+# Base64-alphabet runs long enough to be payloads embedded inside a larger
+# string, e.g. a blob echoed within a JSON-serialized tool result.
+_EMBEDDED_BASE64_RE = re.compile(r"[A-Za-z0-9+/_-]{512,}={0,2}")
 
 
 def _sanitize_string(value: str) -> str:
@@ -23,8 +26,10 @@ def _sanitize_string(value: str) -> str:
         and ";base64," in value
     ):
         return BASE64_REMOVED_PLACEHOLDER
-    if len(value) >= _BASE64_MIN_CHARS and _BASE64_RE.fullmatch(value):
-        return BASE64_REMOVED_PLACEHOLDER
+    if len(value) >= _BASE64_MIN_CHARS:
+        if _BASE64_RE.fullmatch(value):
+            return BASE64_REMOVED_PLACEHOLDER
+        return _EMBEDDED_BASE64_RE.sub(BASE64_REMOVED_PLACEHOLDER, value)
     return value
 
 
@@ -38,6 +43,11 @@ def _charge(budget: list[int], units: int) -> bool:
 
 def _sanitize_value_bounded(value: Any, seen: set[int], budget: list[int]) -> Any:
     if isinstance(value, str):
+        # Bound pattern work to the retainable window first: previews are
+        # truncated anyway, so scanning beyond the budget is pure waste on
+        # large payloads.
+        if len(value) > budget[0]:
+            value = value[: budget[0]]
         sanitized = _sanitize_string(value)
         if len(sanitized) <= budget[0]:
             budget[0] -= len(sanitized)
