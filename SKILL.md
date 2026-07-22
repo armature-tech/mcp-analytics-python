@@ -68,12 +68,17 @@ The SDK needs one credential plus an optional URL override:
 | Variable | What it is |
 | --- | --- |
 | `ANALYTICS_INGEST_API_KEY` | Armature ingest API key. Identifies the MCP server and signs each batch. |
-| `ANALYTICS_INGEST_URL` | Optional. Defaults to `https://app.armature.tech/api/mcp-analytics/ingest`. Override for local mock or staging. |
+| `ANALYTICS_INGEST_URL` | Optional. US defaults to `https://app.armature.tech/api/mcp-analytics/ingest`; set `https://eu.armature.tech/api/mcp-analytics/ingest` for EU. Override for local mock or staging. |
 
 Add `ANALYTICS_INGEST_API_KEY` to the repo's env mechanism (`.env.example`,
 Docker/Kubernetes manifests, deployment docs, secret manager config). Do not
 commit real secret values. If the key is missing at runtime, the SDK silently
 no-ops; that is intentional for local development.
+
+The network emitter uses a 5-second timeout per attempt and at most two
+attempts, separated by 100 ms. It retries only network failures, timeouts,
+`429`, and `5xx`; other `4xx` responses are reported once as a structured
+`IngestDeliveryError` through `on_error` without breaking the host application.
 
 ## Step 4: Pick delivery mode
 
@@ -280,7 +285,8 @@ npx @armature-tech/mcp-analytics doctor --url http://localhost:3000/mcp
 Use the same `ANALYTICS_INGEST_API_KEY` and `ANALYTICS_INGEST_URL` as
 the Python server. The doctor verifies the MCP handshake, all served tool
 schemas, and ingest authentication with an empty batch containing no customer
-content. Include its result in the handoff.
+content. It refuses to probe when marked key, ingest, and MCP regions conflict.
+Include its result in the handoff.
 
 ## Step 7: Mention the gotchas, then stop
 

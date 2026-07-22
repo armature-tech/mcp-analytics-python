@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import urllib.error
 import urllib.request
 from typing import Any
@@ -10,8 +11,45 @@ from .types import ActorIdResolverInput, AnalyticsConfig, AnalyticsIngestBatch
 from .utils import header_value, read_env
 
 DEFAULT_ENDPOINT_URL = "https://app.armature.tech/api/mcp-analytics/ingest"
-DEFAULT_TIMEOUT_MS = 500
+DEFAULT_TIMEOUT_MS = 5_000
+DEFAULT_INGEST_MAX_ATTEMPTS = 2
+DEFAULT_INGEST_RETRY_DELAY_SECONDS = 0.1
 DEFAULT_USER_AGENT = "armature-mcp-analytics-python"
+
+
+class IngestDeliveryError(RuntimeError):
+    """Structured, payload-free diagnostic for a failed ingest delivery."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        attempts: int,
+        status: int | None = None,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status = status
+        self.retryable = retryable
+        self.attempts = attempts
+
+
+def _response_error_code(error: urllib.error.HTTPError) -> str:
+    fallback = f"ingest_http_{error.code}"
+    try:
+        body = error.read(4_096).decode("utf-8", errors="replace")
+        payload = json.loads(body)
+        nested = payload.get("error") if isinstance(payload, dict) else None
+        candidate = (
+            nested.get("code") if isinstance(nested, dict) else None
+        ) or (payload.get("errorCode") if isinstance(payload, dict) else None)
+        if isinstance(candidate, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_:-]{0,99}", candidate):
+            return candidate
+    except (AttributeError, TypeError, ValueError):
+        pass
+    return fallback
 
 
 def _armature(config: AnalyticsConfig | None) -> dict[str, Any]:
@@ -105,11 +143,42 @@ async def post_telemetry_event(
             status = response.getcode()
             return {"skipped": False, "ok": True, "status": status}
 
-    try:
-        return await asyncio.to_thread(send)
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"Armature ingest failed with {error.code}: {detail}") from error
+    for attempt in range(1, DEFAULT_INGEST_MAX_ATTEMPTS + 1):
+        try:
+            result = await asyncio.to_thread(send)
+            return {**result, "attempts": attempt}
+        except urllib.error.HTTPError as error:
+            code = _response_error_code(error)
+            retryable = error.code == 429 or error.code >= 500
+            if retryable and attempt < DEFAULT_INGEST_MAX_ATTEMPTS:
+                await asyncio.sleep(DEFAULT_INGEST_RETRY_DELAY_SECONDS)
+                continue
+            raise IngestDeliveryError(
+                f"Armature ingest failed with HTTP {error.code} ({code})",
+                code=code,
+                status=error.code,
+                retryable=retryable,
+                attempts=attempt,
+            ) from error
+        except (TimeoutError, urllib.error.URLError, OSError) as error:
+            reason = getattr(error, "reason", None)
+            timed_out = isinstance(error, TimeoutError) or isinstance(reason, TimeoutError)
+            if attempt < DEFAULT_INGEST_MAX_ATTEMPTS:
+                await asyncio.sleep(DEFAULT_INGEST_RETRY_DELAY_SECONDS)
+                continue
+            code = "ingest_timeout" if timed_out else "ingest_connection_failed"
+            raise IngestDeliveryError(
+                "Armature ingest timed out" if timed_out else "Armature ingest connection failed",
+                code=code,
+                retryable=True,
+                attempts=attempt,
+            ) from error
+
+    raise IngestDeliveryError(
+        "Armature ingest delivery failed",
+        code="ingest_delivery_failed",
+        attempts=DEFAULT_INGEST_MAX_ATTEMPTS,
+    )
 
 
 class FlushableEmitter:

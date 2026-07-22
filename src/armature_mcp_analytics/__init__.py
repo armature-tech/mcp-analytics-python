@@ -1,6 +1,12 @@
 """Armature analytics helpers for Python MCP servers."""
 
-from .emit import post_telemetry_event
+from .emit import (
+    DEFAULT_INGEST_MAX_ATTEMPTS,
+    DEFAULT_INGEST_RETRY_DELAY_SECONDS,
+    DEFAULT_TIMEOUT_MS,
+    IngestDeliveryError,
+    post_telemetry_event,
+)
 from .events import (
     build_actor_id,
     build_actor_identity_event,
@@ -74,7 +80,11 @@ __all__ = [
     "AnalyticsRecorder",
     "BASE64_REMOVED_PLACEHOLDER",
     "BINARY_REMOVED_PLACEHOLDER",
+    "DEFAULT_INGEST_MAX_ATTEMPTS",
+    "DEFAULT_INGEST_RETRY_DELAY_SECONDS",
+    "DEFAULT_TIMEOUT_MS",
     "FastMCPInstrumentation",
+    "IngestDeliveryError",
     "McpClientInfo",
     "PRIVACY_QUEUE_BATCH_SIZE",
     "PRIVACY_QUEUE_CAPACITY",
