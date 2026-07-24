@@ -120,6 +120,8 @@ class ArmatureConfig(TypedDict, total=False):
     schedule: Callable[[Awaitable[None]], Any]
     telemetry_field_map: TelemetryFieldMap
     telemetryFieldMap: TelemetryFieldMap
+    # SDK-owned request_capability tool: on by default when a delivery path is
+    # configured. Set either alias to False to disable.
     request_capability: bool
     requestCapability: bool
 

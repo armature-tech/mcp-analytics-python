@@ -21,6 +21,9 @@ instrument_fastmcp(
             "delivery": "await",
             "timeout_ms": 10_000,
             "actor_id": "sdk-canary-browser-worker",
+            # The HTTP smoke test asserts an exact tool list; keep the
+            # on-by-default request_capability tool out of this fixture.
+            "request_capability": False,
         }
     },
 )

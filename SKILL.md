@@ -61,19 +61,29 @@ pip install "armature-mcp-analytics[fastmcp,mcp]"
 Do not add both `fastmcp` and `mcp` manually unless the package manager requires
 explicit dependencies. Prefer the extras because they encode the tested ranges.
 
-## Step 3: Add the API key environment variable
+## Step 3: Add the regional environment variables
 
-The SDK needs one credential plus an optional URL override:
+The SDK needs one credential and an endpoint that matches the account region:
 
 | Variable | What it is |
 | --- | --- |
 | `ANALYTICS_INGEST_API_KEY` | Armature ingest API key. Identifies the MCP server and signs each batch. |
-| `ANALYTICS_INGEST_URL` | Optional. Defaults to `https://app.armature.tech/api/mcp-analytics/ingest`. Override for local mock or staging. |
+| `ANALYTICS_INGEST_URL` | Optional only for US, which defaults to `https://app.armature.tech/api/mcp-analytics/ingest`. Required for EU and must be `https://eu.armature.tech/api/mcp-analytics/ingest`. It may also target a local mock or staging environment. |
 
-Add `ANALYTICS_INGEST_API_KEY` to the repo's env mechanism (`.env.example`,
-Docker/Kubernetes manifests, deployment docs, secret manager config). Do not
-commit real secret values. If the key is missing at runtime, the SDK silently
-no-ops; that is intentional for local development.
+Add `ANALYTICS_INGEST_API_KEY` and the region-appropriate
+`ANALYTICS_INGEST_URL` to the repo's env mechanism (`.env.example`,
+Docker/Kubernetes manifests, deployment docs, secret manager config). When the
+Armature dashboard supplies a copied two-line configuration, preserve both
+lines; never discard the URL for an EU account. Do not commit real secret
+values. A hand-authored US configuration may omit the URL because the SDK
+defaults to the US endpoint, but keeping it explicit is recommended. If the
+key is missing at runtime, the SDK silently no-ops; that is intentional for
+local development.
+
+The network emitter uses a 5-second timeout per attempt and at most two
+attempts, separated by 100 ms. It retries only network failures, timeouts,
+`429`, and `5xx`; other `4xx` responses are reported once as a structured
+`IngestDeliveryError` through `on_error` without breaking the host application.
 
 ## Step 4: Pick delivery mode
 
@@ -134,6 +144,7 @@ instrumentation = instrument_fastmcp(
         "armature": {
             "api_key": os.getenv("ANALYTICS_INGEST_API_KEY"),
             "delivery": "await",
+            # request_capability is on by default; add "request_capability": False to disable (see Step 7).
         }
     },
 )
@@ -287,7 +298,8 @@ npx @armature-tech/mcp-analytics doctor --url http://localhost:3000/mcp
 Use the same `ANALYTICS_INGEST_API_KEY` and `ANALYTICS_INGEST_URL` as
 the Python server. The doctor verifies the MCP handshake, all served tool
 schemas, and ingest authentication with an empty batch containing no customer
-content. Include its result in the handoff.
+content. It refuses to probe when marked key, ingest, and MCP regions conflict.
+Include its result in the handoff.
 
 ## Step 7: Mention the gotchas, then stop
 
@@ -295,8 +307,14 @@ Tell the user briefly:
 
 - Which FastMCP import path you detected.
 - Which delivery mode you chose and why.
-- Where they must set `ANALYTICS_INGEST_API_KEY`.
+- Where they must set `ANALYTICS_INGEST_API_KEY` and the regional
+  `ANALYTICS_INGEST_URL`; call out that the URL is required for EU.
 - That missing API keys no-op for local development.
+- That the SDK adds a `request_capability` tool (on by default) so the agent can
+  report a capability the current tools can't satisfy — this is what surfaces
+  "unmet demand" use cases in Armature. It's recommended, so leave it on. Tell the
+  user it's enabled and offer to turn it off: set `"request_capability": False` in
+  the `armature` config if they'd rather not expose it.
 
 ## What NOT to do
 

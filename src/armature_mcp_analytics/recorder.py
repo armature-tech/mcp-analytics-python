@@ -10,6 +10,7 @@ from .capability import (
     REQUEST_CAPABILITY_TOOL_NAME,
     acknowledge_capability_request,
     request_capability_enabled,
+    request_capability_explicit,
     request_capability_registration,
 )
 from .emit import _config_value, resolve_actor_identifier, resolve_actor_seed
@@ -390,7 +391,13 @@ class AnalyticsRecorder:
 
     def tool(self, registration: ToolRegistration, handler: Any):
         name = registration["name"]
-        if request_capability_enabled(self.config) and name == REQUEST_CAPABILITY_TOOL_NAME:
+        if (
+            request_capability_enabled(self.config)
+            and name == REQUEST_CAPABILITY_TOOL_NAME
+            and request_capability_explicit(self.config)
+        ):
+            # Reserved only on explicit opt-in; when on by default a customer
+            # tool of the same name takes precedence and overwrites the SDK one.
             raise ValueError(
                 "Tool name 'request_capability' is reserved while "
                 "armature.request_capability is enabled."

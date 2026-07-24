@@ -25,13 +25,25 @@ If FastMCP comes from the official MCP Python SDK:
 pip install "armature-mcp-analytics[mcp]"
 ~~~
 
-### 2. Add your ingest key
+### 2. Add your regional ingest configuration
 
-Create a server in the [Armature dashboard](https://app.armature.tech), copy its ingest key, and add it to your environment:
+Create a server in the Armature dashboard for your account's region, then copy
+**both** generated environment variables into your server environment:
 
 ~~~bash
 export ANALYTICS_INGEST_API_KEY="..."
+export ANALYTICS_INGEST_URL="https://app.armature.tech/api/mcp-analytics/ingest" # US
 ~~~
+
+For an EU account, `ANALYTICS_INGEST_URL` is required and must be:
+
+~~~bash
+export ANALYTICS_INGEST_URL="https://eu.armature.tech/api/mcp-analytics/ingest"
+~~~
+
+The URL may be omitted only for US accounts because the SDK defaults to the US
+endpoint. Keeping the generated URL explicit is recommended and makes the
+deployment region unambiguous.
 
 ### Verify the installation locally
 
@@ -44,7 +56,8 @@ npx @armature-tech/mcp-analytics doctor --url http://localhost:3000/mcp
 It performs an MCP handshake, verifies every served tool exposes Armature's
 telemetry contract, and authenticates the configured ingest key with an empty
 batch containing no sessions or customer content. Use `--skip-ingest` for an
-offline-only check and `--json` for a machine-readable report.
+offline-only check and `--json` for a machine-readable report. Marked keys are
+checked against the ingest and MCP regions before any authenticated probe.
 
 ### 3. Instrument FastMCP
 
@@ -232,7 +245,9 @@ The playbook covers both FastMCP import paths and custom dispatchers.
 
 ## Configuration
 
-Most servers only need **ANALYTICS_INGEST_API_KEY**. Operational controls are available when you need them:
+Every server needs **ANALYTICS_INGEST_API_KEY**. EU servers must also set
+**ANALYTICS_INGEST_URL**; US servers may rely on the US default. Operational
+controls are available when you need them:
 
 ~~~python
 instrumentation = instrument_fastmcp(
@@ -247,10 +262,10 @@ instrumentation = instrument_fastmcp(
             "redact_secrets": True,
             "redact_event": None,
             "schedule": None,
-            "timeout_ms": 500,
+            "timeout_ms": 5000,
             "emit": None,
             "on_error": None,
-            "request_capability": False,
+            "request_capability": True,
         }
     },
 )
@@ -258,13 +273,13 @@ instrumentation = instrument_fastmcp(
 
 | Option | Default | Purpose |
 | --- | --- | --- |
-| **endpoint_url** | Armature cloud | Override the ingestion endpoint |
+| **endpoint_url** | US Armature cloud | Override the ingestion endpoint; use `https://eu.armature.tech/api/mcp-analytics/ingest` for EU |
 | **api_key** | **ANALYTICS_INGEST_API_KEY** | Authenticate events and identify the MCP server |
 | **actor_id** | Derived from request auth | Supply a stable user or tenant seed |
 | **actor_identifier** | None | Store a caller-provided identifier verbatim |
 | **enabled** | **True** | Enable or disable instrumentation |
 | **delivery** | **"background"** | Use **"await"** for serverless or short-lived processes |
-| **timeout_ms** | **500** | Set the delivery timeout |
+| **timeout_ms** | **5000** | Set the timeout for each delivery attempt |
 | **emit** | Network emitter | Replace delivery for tests or custom pipelines |
 | **on_error** | None | Observe delivery failures |
 | **capture_telemetry** | **True** | Disable conversation-derived telemetry entirely (see below) |
@@ -273,20 +288,27 @@ instrumentation = instrument_fastmcp(
 | **redact_event** | None | Sync/async whole-event hook that may mutate or drop a tool call |
 | **schedule** | None | Register background work with a serverless lifecycle primitive |
 | **telemetry_field_map** | None | Export existing argument fields as telemetry (see below) |
-| **request_capability** | **False** | Inject `request_capability` so agents can report an unmet tool need |
+| **request_capability** | **True** | Inject `request_capability` so agents can report an unmet tool need; set `False` to disable |
+
+Network failures, timeouts, `429`, and `5xx` responses are retried once after
+100 ms (two attempts total). Other `4xx` responses are not retried.
+`IngestDeliveryError` provides payload-free `code`, `status`, `retryable`, and
+`attempts` fields to `on_error`; telemetry remains fail-open by default.
 
 ### Capability requests
 
-Set **request_capability: True** to dynamically add a `request_capability`
-tool. It accepts one required `capability` string and uses this description
-exactly:
+A `request_capability` tool is added dynamically by default. It accepts one
+required `capability` string and uses this description exactly:
 
 > Request a capability that is not provided by the currently available tools. Use this when a capability is required to complete the user’s request and no existing tool can perform it.
 
 Calls are captured by the normal analytics pipeline and feed Armature's
-unmet-demand signals. The tool is not added when the option is omitted or
-false, when **enabled: False**, or when no API key/custom **emit** delivery is
-configured. The camelCase alias **requestCapability** is also accepted.
+unmet-demand signals. Set **request_capability: False** to disable it. The tool
+is also suppressed when **enabled: False** or when no API key/custom **emit**
+delivery is configured. When you explicitly set **request_capability: True**, a
+customer tool of the same name is rejected as reserved; when it is on merely by
+default, the customer tool takes precedence and the SDK skips its own injection.
+The camelCase alias **requestCapability** is also accepted.
 
 ### Telemetry capture and privacy
 
@@ -408,7 +430,7 @@ asyncio.run(main())
 | Variable | Purpose |
 | --- | --- |
 | **ANALYTICS_INGEST_API_KEY** | Armature ingest key |
-| **ANALYTICS_INGEST_URL** | Optional ingestion endpoint override |
+| **ANALYTICS_INGEST_URL** | Optional only for US, which defaults to `https://app.armature.tech/api/mcp-analytics/ingest`. Required for EU and must be `https://eu.armature.tech/api/mcp-analytics/ingest`. Preserve this variable when copying dashboard configuration. |
 
 ## Example
 
@@ -419,7 +441,9 @@ cd examples/minimal
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-ANALYTICS_INGEST_API_KEY="..." python server.py
+ANALYTICS_INGEST_API_KEY="..." \
+ANALYTICS_INGEST_URL="https://app.armature.tech/api/mcp-analytics/ingest" \
+python server.py
 ~~~
 
 ## Support

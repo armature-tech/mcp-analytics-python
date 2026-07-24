@@ -29,12 +29,36 @@ class FakeFastMCP:
 
 
 class RequestCapabilityTests(unittest.TestCase):
-    def test_recorder_injection_is_opt_in_and_respects_global_disable(self) -> None:
+    def test_recorder_off_without_sink_or_when_disabled(self) -> None:
+        # No delivery path configured -> nothing is injected regardless of the
+        # default, and an explicit global disable also suppresses it.
         self.assertFalse(create_analytics_recorder().has_tool("request_capability"))
         disabled = create_analytics_recorder(
             {"armature": {"enabled": False, "request_capability": True}}
         )
         self.assertFalse(disabled.has_tool("request_capability"))
+
+    def test_recorder_on_by_default_once_a_sink_is_configured(self) -> None:
+        on = create_analytics_recorder({"armature": {"emit": lambda _b: None}})
+        self.assertTrue(on.has_tool("request_capability"))
+        # Explicit opt-out disables it (either alias).
+        off = create_analytics_recorder(
+            {"armature": {"emit": lambda _b: None, "request_capability": False}}
+        )
+        self.assertFalse(off.has_tool("request_capability"))
+        off_camel = create_analytics_recorder(
+            {"armature": {"emit": lambda _b: None, "requestCapability": False}}
+        )
+        self.assertFalse(off_camel.has_tool("request_capability"))
+
+    def test_default_on_yields_to_a_customer_tool(self) -> None:
+        recorder = create_analytics_recorder(
+            {"armature": {"emit": lambda _batch: None}}
+        )
+        # On by default (not explicitly opted in): a customer tool of the same
+        # name is allowed and takes precedence instead of being reserved.
+        recorder.tool({"name": "request_capability"}, lambda _args: None)
+        self.assertTrue(recorder.has_tool("request_capability"))
 
     def test_recorder_definition_dispatch_and_analytics(self) -> None:
         batches = []

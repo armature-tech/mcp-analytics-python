@@ -23,14 +23,31 @@ def request_capability_enabled(config: AnalyticsConfig | None) -> bool:
     armature = (config or {}).get("armature") or {}
     if armature.get("enabled") is False:
         return False
+    # On by default: enabled unless the caller explicitly opted out with False
+    # (either the snake_case or camelCase alias).
     requested = (
-        armature.get("request_capability") is True
-        or armature.get("requestCapability") is True
+        armature.get("request_capability") is not False
+        and armature.get("requestCapability") is not False
     )
     has_delivery = callable(_config_value(config, "emit", "emit")) or bool(
         resolve_api_key(config)
     )
     return requested and has_delivery
+
+
+def request_capability_explicit(config: AnalyticsConfig | None) -> bool:
+    """True only when the caller explicitly opted in (either alias set to True).
+
+    Injection is governed by request_capability_enabled (on unless explicitly
+    disabled); the reserved-name guards key off this stricter check so a server
+    that is on merely by default yields to a pre-existing customer tool of the
+    same name instead of raising on upgrade.
+    """
+    armature = (config or {}).get("armature") or {}
+    return (
+        armature.get("request_capability") is True
+        or armature.get("requestCapability") is True
+    )
 
 
 def request_capability_registration() -> ToolRegistration:

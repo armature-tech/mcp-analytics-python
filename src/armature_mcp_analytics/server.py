@@ -13,6 +13,7 @@ from .capability import (
     REQUEST_CAPABILITY_DESCRIPTION,
     REQUEST_CAPABILITY_TOOL_NAME,
     request_capability_enabled,
+    request_capability_explicit,
     request_capability_registration,
 )
 from .recorder import AnalyticsRecorder, create_analytics_recorder
@@ -544,12 +545,21 @@ def instrument_fastmcp(server: Any, config: AnalyticsConfig | None = None) -> Fa
         raise TypeError("instrument_fastmcp expects a FastMCP-like object with a callable .tool attribute.")
     supports_schema_kwargs = _supports_schema_kwargs(original_tool)
 
-    if request_capability_enabled(config):
-        if _server_has_tool_named(server, REQUEST_CAPABILITY_TOOL_NAME):
+    should_inject_request_capability = request_capability_enabled(config)
+    if should_inject_request_capability and _server_has_tool_named(
+        server, REQUEST_CAPABILITY_TOOL_NAME
+    ):
+        # Reserved only when the caller explicitly opted in; when on by default
+        # the customer's pre-existing tool of the same name wins and the SDK
+        # skips its own injection instead of raising on upgrade.
+        if request_capability_explicit(config):
             raise ValueError(
                 "Tool name 'request_capability' is reserved while "
                 "armature.request_capability is enabled."
             )
+        should_inject_request_capability = False
+
+    if should_inject_request_capability:
 
         def request_capability(capability: str) -> str:
             if not capability.strip() or len(capability) > 1000:
@@ -602,7 +612,10 @@ def instrument_fastmcp(server: Any, config: AnalyticsConfig | None = None) -> Fa
             if (
                 request_capability_enabled(config)
                 and str(name) == REQUEST_CAPABILITY_TOOL_NAME
+                and request_capability_explicit(config)
             ):
+                # Reserved only on explicit opt-in; on by default the customer's
+                # tool of the same name takes precedence.
                 raise ValueError(
                     "Tool name 'request_capability' is reserved while "
                     "armature.request_capability is enabled."

@@ -287,6 +287,7 @@ class FastMCPAdapterTests(unittest.TestCase):
             {
                 "armature": {
                     "delivery": "await",
+                    "request_capability": False,
                     "actor_id": "real-fastmcp-actor",
                     "emit": batches.append,
                 }
@@ -391,7 +392,7 @@ class FastMCPAdapterTests(unittest.TestCase):
         def build(instrument: bool) -> FastMCP:
             mcp = FastMCP("schema-parity")
             if instrument:
-                instrument_fastmcp(mcp, {"armature": {"delivery": "await", "emit": lambda batch: None}})
+                instrument_fastmcp(mcp, {"armature": {"delivery": "await", "request_capability": False, "emit": lambda batch: None}})
             mcp.tool()(fixture.get_customer)
             mcp.tool()(fixture.get_customer_model)
             return mcp
@@ -441,6 +442,7 @@ class FastMCPAdapterTests(unittest.TestCase):
                         "armature": {
                             "delivery": "await",
                             "capture_telemetry": False,
+                            "request_capability": False,
                             "actor_id": "capture-off-actor",
                             "emit": batches.append,
                         }
@@ -511,6 +513,7 @@ class FastMCPAdapterTests(unittest.TestCase):
                         "armature": {
                             "delivery": "await",
                             "capture_telemetry": False,
+                            "request_capability": False,
                             "actor_id": "capture-off-actor",
                             "emit": batches.append,
                         }

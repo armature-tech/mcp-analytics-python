@@ -2,16 +2,98 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+import urllib.error
 from unittest import mock
+from unittest.mock import patch
 
 from armature_mcp_analytics.emit import (
+    DEFAULT_TIMEOUT_MS,
+    IngestDeliveryError,
     IngestRejectedError,
     create_flushable_emitter,
     detect_ingest_rejection,
+    post_telemetry_event,
 )
 
 
 class EmitTests(unittest.TestCase):
+    def test_default_timeout_is_five_seconds(self) -> None:
+        self.assertEqual(DEFAULT_TIMEOUT_MS, 5_000)
+
+    def test_transient_delivery_is_retried_once(self) -> None:
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def getcode(self):
+                return 202
+
+            def read(self):
+                return b'{"accepted":0,"rejected":[]}'
+
+        failure = urllib.error.HTTPError(
+            "https://eu.armature.tech/api/mcp-analytics/ingest",
+            503,
+            "unavailable",
+            {},
+            None,
+        )
+        failure.read = lambda *_args: b'{"error":{"code":"temporarily_unavailable"}}'
+        with patch("urllib.request.urlopen", side_effect=[failure, Response()]) as mocked:
+            result = asyncio.run(post_telemetry_event(
+                {"schema_version": 1, "events": []},
+                {"armature": {"api_key": "ami_eu_test"}},
+            ))
+        self.assertEqual(result["attempts"], 2)
+        self.assertEqual(mocked.call_count, 2)
+
+    def test_unauthorized_delivery_is_not_retried(self) -> None:
+        failure = urllib.error.HTTPError(
+            "https://eu.armature.tech/api/mcp-analytics/ingest",
+            401,
+            "unauthorized",
+            {},
+            None,
+        )
+        failure.read = lambda *_args: b'{"error":{"code":"ingest_key_wrong_region","message":"secret"}}'
+        with patch("urllib.request.urlopen", side_effect=failure) as mocked:
+            with self.assertRaises(IngestDeliveryError) as raised:
+                asyncio.run(post_telemetry_event(
+                    {"schema_version": 1, "events": []},
+                    {"armature": {"api_key": "ami_us_test"}},
+                ))
+        self.assertEqual(raised.exception.code, "ingest_key_wrong_region")
+        self.assertEqual(raised.exception.status, 401)
+        self.assertEqual(raised.exception.retryable, False)
+        self.assertEqual(raised.exception.attempts, 1)
+        self.assertNotIn("secret", str(raised.exception))
+        self.assertEqual(mocked.call_count, 1)
+
+    def test_network_failure_is_retried_once(self) -> None:
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("offline")) as mocked:
+            with self.assertRaises(IngestDeliveryError) as raised:
+                asyncio.run(post_telemetry_event(
+                    {"schema_version": 1, "events": []},
+                    {"armature": {"api_key": "ami_us_test"}},
+                ))
+        self.assertEqual(raised.exception.code, "ingest_connection_failed")
+        self.assertEqual(raised.exception.attempts, 2)
+        self.assertEqual(mocked.call_count, 2)
+
+    def test_timeout_is_retried_once(self) -> None:
+        with patch("urllib.request.urlopen", side_effect=TimeoutError("timed out")) as mocked:
+            with self.assertRaises(IngestDeliveryError) as raised:
+                asyncio.run(post_telemetry_event(
+                    {"schema_version": 1, "events": []},
+                    {"armature": {"api_key": "ami_us_test", "timeout_ms": 5}},
+                ))
+        self.assertEqual(raised.exception.code, "ingest_timeout")
+        self.assertEqual(raised.exception.attempts, 2)
+        self.assertEqual(mocked.call_count, 2)
+
     def test_flush_waits_for_background_tasks(self) -> None:
         emitted = []
 
