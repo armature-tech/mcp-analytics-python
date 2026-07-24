@@ -87,6 +87,13 @@ class StatelessHttpTests(unittest.IsolatedAsyncioTestCase):
             {"name": "mcp-tester-claude-remote-proxy", "version": "0.1.0"},
         )
 
+    def test_run_scoped_seed_accepts_time_ordered_uuid_v7(self) -> None:
+        seed = "019f942a-5d64-7322-8e50-5d17333768d9"
+        self.assertEqual(
+            build_stateless_session_id({"name": "client"}, seed),
+            f"mcp_client_v__{seed}",
+        )
+
     def test_invalid_session_seed_is_ignored(self) -> None:
         session = resolve_stateless_http_session(
             body={
