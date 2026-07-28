@@ -156,7 +156,18 @@ class AnalyticsIngestEvent(_RequiredAnalyticsIngestEvent, total=False):
     workflow_run_id: str
 
 
-class AnalyticsIngestBatch(TypedDict):
+class AnalyticsBatchSdk(TypedDict):
+    """Which SDK produced the batch; stamped at the delivery boundary."""
+
+    language: str
+    version: str
+
+
+class _AnalyticsIngestBatchOptional(TypedDict, total=False):
+    sdk: AnalyticsBatchSdk
+
+
+class AnalyticsIngestBatch(_AnalyticsIngestBatchOptional):
     schema_version: Literal[1]
     events: list[AnalyticsIngestEvent]
 

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 from unittest import mock
 
 from armature_mcp_analytics import create_analytics_recorder, events
 from armature_mcp_analytics.emit import post_telemetry_event
+from armature_mcp_analytics.version import SDK_VERSION
 
 
 class RecorderTests(unittest.TestCase):
@@ -179,7 +181,40 @@ class RecorderTests(unittest.TestCase):
         self.assertEqual(request.get_header("Accept"), "application/json")
         self.assertEqual(request.get_header("Content-type"), "application/json")
         self.assertEqual(request.get_header("Authorization"), "Bearer ami_test")
-        self.assertEqual(request.get_header("User-agent"), "armature-mcp-analytics-python")
+        self.assertEqual(
+            request.get_header("User-agent"),
+            f"armature-mcp-analytics-python/{SDK_VERSION}",
+        )
+
+    def test_default_emitter_stamps_sdk_identity(self) -> None:
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def getcode(self):
+                return 202
+
+            def read(self):
+                return b'{"accepted":0,"rejected":[]}'
+
+        with mock.patch(
+            "armature_mcp_analytics.emit.urllib.request.urlopen",
+            return_value=Response(),
+        ) as urlopen:
+            asyncio.run(post_telemetry_event(
+                {"schema_version": 1, "events": []},
+                {"armature": {"api_key": "ami_test", "delivery": "await"}},
+            ))
+
+        body = json.loads(urlopen.call_args.args[0].data.decode("utf-8"))
+        self.assertEqual(body["sdk"], {"language": "python", "version": SDK_VERSION})
+        # The version must come from installed-package metadata, never a
+        # hardcoded string: an installed distribution reports its real semver,
+        # a bare source tree the development placeholder.
+        self.assertRegex(SDK_VERSION, r"^\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$")
 
     def test_dispatch_strips_telemetry_and_emits_tool_call(self) -> None:
         batches = []

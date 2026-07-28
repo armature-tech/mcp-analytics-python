@@ -9,12 +9,13 @@ from typing import Any
 
 from .types import ActorIdResolverInput, AnalyticsConfig, AnalyticsIngestBatch
 from .utils import header_value, read_env
+from .version import SDK_IDENTITY, SDK_USER_AGENT
 
 DEFAULT_ENDPOINT_URL = "https://app.armature.tech/api/mcp-analytics/ingest"
 DEFAULT_TIMEOUT_MS = 5_000
 DEFAULT_INGEST_MAX_ATTEMPTS = 2
 DEFAULT_INGEST_RETRY_DELAY_SECONDS = 0.1
-DEFAULT_USER_AGENT = "armature-mcp-analytics-python"
+DEFAULT_USER_AGENT = SDK_USER_AGENT
 
 
 class IngestDeliveryError(RuntimeError):
@@ -122,7 +123,10 @@ async def post_telemetry_event(
     if not api_key:
         return {"skipped": True, "reason": "ingest_config_missing"}
 
-    body = json.dumps(batch, separators=(",", ":")).encode("utf-8")
+    # Stamp the SDK identity at the delivery boundary so every batch that
+    # reaches Armature ingest carries it, regardless of which path built it.
+    stamped = batch if batch.get("sdk") else {**batch, "sdk": SDK_IDENTITY}
+    body = json.dumps(stamped, separators=(",", ":")).encode("utf-8")
     request = urllib.request.Request(
         resolve_endpoint_url(config),
         data=body,
