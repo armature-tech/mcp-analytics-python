@@ -132,14 +132,17 @@ All telemetry fields are optional. Send **agent_thinking** on every call; send *
 
 | Your server | Install | Integration |
 | --- | --- | --- |
-| **from fastmcp import FastMCP** | **armature-mcp-analytics[fastmcp]** | **instrument_fastmcp(...)** |
-| **from mcp.server.fastmcp import FastMCP** | **armature-mcp-analytics[mcp]** | **instrument_fastmcp(...)** |
+| **from fastmcp import FastMCP** (2.x-4.x) | **armature-mcp-analytics[fastmcp]** | **instrument_fastmcp(...)** |
+| **from mcp.server.fastmcp import FastMCP** (SDK 1.x) | **armature-mcp-analytics[mcp]** | **instrument_fastmcp(...)** |
+| **from mcp.server.mcpserver import MCPServer** (SDK 2.x) | **armature-mcp-analytics[mcp]** | **instrument_fastmcp(...)** |
 | Custom dispatcher | Base package | **create_analytics_recorder(...)** |
-| Stateless HTTP / serverless | Base package | **StatelessHttpSessionMiddleware(...)** |
+| Stateless HTTP / serverless (handshake era) | Base package | **StatelessHttpSessionMiddleware(...)** |
 
 The FastMCP wrapper is idempotent. Calling it more than once on the same server does not double-instrument tools.
 
 ### Official MCP Python SDK
+
+SDK 1.x:
 
 ~~~python
 from mcp.server.fastmcp import FastMCP
@@ -148,6 +151,42 @@ from armature_mcp_analytics import instrument_fastmcp
 mcp = FastMCP("Customer MCP")
 instrument_fastmcp(mcp, {"armature": {"delivery": "await"}})
 ~~~
+
+SDK 2.x (spec revision 2026-07-28, renamed server class):
+
+~~~python
+from mcp.server.mcpserver import MCPServer
+from armature_mcp_analytics import instrument_fastmcp
+
+mcp = MCPServer("Customer MCP")
+instrument_fastmcp(mcp, {"armature": {"delivery": "await"}})
+~~~
+
+The dual-era `mcp.streamable_http_app()` is fully supported: one endpoint
+serves both handshake-era clients and modern stateless-era clients.
+
+### Session identity in the stateless era (MCP 2026-07-28)
+
+The 2026-07-28 protocol revision has no `initialize` handshake and no
+`Mcp-Session-Id`. The SDK resolves a session for each request in this order:
+
+1. `gen_ai.conversation.id` from the `baggage` request `_meta` key
+   (W3C baggage format, URL-decoded);
+2. the `x-armature-session-seed` HTTP header;
+3. a legacy `Mcp-Session-Id` header, when a handshake-era client sent one;
+4. a process-scoped id, only when there is genuinely no HTTP request (stdio);
+5. otherwise none — ingest buckets the activity server-side.
+
+Client name/version, the negotiated protocol version, and capabilities are
+read per-request from the reserved `io.modelcontextprotocol/*` `_meta` keys
+(`clientInfo` is optional; requests without it are attributed to an unknown
+client). The raw `_meta` block is captured verbatim into each tool_call
+event's metadata as `request_meta`, capped at 4 KB with a truncation marker.
+
+If `mcp>=2` is installed but a tool call reaches the recorder without any
+per-request context (for example a hand-rolled server object), the SDK logs a
+loud one-time warning that session attribution will degrade — it never
+crashes the host server.
 
 ### Custom dispatcher
 
@@ -198,7 +237,12 @@ result = await analytics.dispatch(
 
 Pass stable session, client, header, and authentication information in the dispatcher context when it is available. Do **not** pass the transport request id as `requestId` — the SDK mints a fresh per-call id, and reusing the per-connection JSON-RPC counter makes concurrent conversations collide on the event dedup key (ingest silently drops the duplicates). Set `requestId` only for a genuine per-invocation idempotency key; it is scoped by `sessionId` automatically.
 
-### Stateless HTTP and serverless
+### Stateless HTTP and serverless (handshake era)
+
+> This scheme applies to handshake-era clients (protocol revisions before
+> 2026-07-28) only. Modern stateless-era requests carry identity in `_meta`
+> and need no minted session id; the middleware detects them, logs a one-time
+> notice, and passes them through untouched.
 
 Initialization and tool calls can land on different instances. Wrap a
 stateless FastMCP ASGI app so `initialize` issues an identity-bearing session
@@ -421,9 +465,14 @@ asyncio.run(main())
 ## Compatibility
 
 - Python 3.10+
-- FastMCP 2.x and 3.x
-- Official MCP Python SDK 1.27+
+- FastMCP 2.x, 3.x, and 4.x (4.x pre-releases supported from 4.0.0a2)
+- Official MCP Python SDK 1.27+ and 2.x (`MCPServer`, spec 2026-07-28)
 - Synchronous and asynchronous tool handlers
+
+Note: fastmcp 4.0.0a2 hard-pins `mcp==2.0.0b2`, so it cannot be co-installed
+with newer mcp 2.x builds (such as 2.0.0rc1) until fastmcp relaxes that pin.
+The extras here are ranges (`mcp>=1.27,<3`, `fastmcp>=2,<5`) and resolve
+cleanly with either combination.
 
 ## Environment variables
 

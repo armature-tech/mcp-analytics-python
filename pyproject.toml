@@ -34,10 +34,10 @@ classifiers = [
 
 [project.optional-dependencies]
 fastmcp = [
-  "fastmcp>=2,<4",
+  "fastmcp>=2,<5",
 ]
 mcp = [
-  "mcp>=1.27,<2",
+  "mcp>=1.27,<3",
 ]
 
 [project.urls]

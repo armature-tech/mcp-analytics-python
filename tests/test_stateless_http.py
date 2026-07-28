@@ -223,6 +223,70 @@ class StatelessHttpTests(unittest.IsolatedAsyncioTestCase):
         fallback = dict(seen_scopes[-1]["headers"])[b"mcp-session-id"].decode()
         self.assertRegex(fallback, r"^[0-9a-f-]{36}$")
 
+    async def test_modern_era_request_is_a_no_op(self) -> None:
+        # MCP 2026-07-28 requests have no initialize and no Mcp-Session-Id;
+        # minting a fallback UUID per POST would fabricate one single-request
+        # session per tool call. The middleware must pass them through
+        # untouched (and log a one-time warning).
+        from armature_mcp_analytics import stateless_http as stateless_module
+
+        seen_scopes = []
+
+        async def app(scope, receive, send):
+            seen_scopes.append(scope)
+            await receive()
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send(
+                {"type": "http.response.body", "body": b'{"jsonrpc":"2.0","id":1,"result":{}}'}
+            )
+
+        middleware = StatelessHttpSessionMiddleware(app)
+        modern_body = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "lookup",
+                "arguments": {},
+                "_meta": {
+                    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                    "io.modelcontextprotocol/clientCapabilities": {},
+                },
+            },
+        }
+
+        incoming = [
+            {"type": "http.request", "body": json.dumps(modern_body).encode(), "more_body": False}
+        ]
+        outgoing = []
+
+        async def receive():
+            return incoming.pop(0)
+
+        async def send(message):
+            outgoing.append(message)
+
+        saved_warned = stateless_module._warned_modern_era
+        stateless_module._warned_modern_era = False
+        try:
+            with self.assertLogs("armature_mcp_analytics", level="WARNING") as logs:
+                await middleware(
+                    {
+                        "type": "http",
+                        "method": "POST",
+                        "headers": [(b"mcp-protocol-version", b"2026-07-28")],
+                    },
+                    receive,
+                    send,
+                )
+        finally:
+            stateless_module._warned_modern_era = saved_warned
+
+        # No minted session id on the request scope or the response.
+        self.assertNotIn(b"mcp-session-id", dict(seen_scopes[-1]["headers"]))
+        self.assertNotIn(b"mcp-session-id", dict(outgoing[0].get("headers", [])))
+        self.assertTrue(any("no-op" in line for line in logs.output))
+
     async def test_failed_initialize_does_not_issue_session_id(self) -> None:
         async def app(_scope, receive, send):
             await receive()

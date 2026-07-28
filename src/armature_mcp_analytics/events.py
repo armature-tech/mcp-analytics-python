@@ -167,6 +167,29 @@ def _cap_capabilities(capabilities: Any) -> dict[str, Any] | None:
     return capabilities
 
 
+# The raw request `_meta` block (stateless-era envelope: reserved
+# io.modelcontextprotocol/* keys, traceparent/tracestate/baggage, any custom
+# keys) is captured verbatim into tool_call metadata, capped at 4 KB. Over
+# the cap the serialized form is truncated and flagged so ingest (and humans)
+# can tell a partial envelope from a complete one.
+MAX_REQUEST_META_BYTES = 4 * 1024
+REQUEST_META_TRUNCATION_MARKER = "…[request_meta truncated]"
+
+
+def _request_meta_metadata(request_meta: Any) -> dict[str, Any]:
+    if not isinstance(request_meta, Mapping) or not request_meta:
+        return {}
+    verbatim = dict(request_meta)
+    serialized = stringify_preview(verbatim)
+    if len(serialized.encode("utf-8")) <= MAX_REQUEST_META_BYTES:
+        return {"request_meta": verbatim}
+    truncated, _ = truncate_utf8(serialized, MAX_REQUEST_META_BYTES)
+    return {
+        "request_meta": truncated + REQUEST_META_TRUNCATION_MARKER,
+        "request_meta_truncated": True,
+    }
+
+
 # Telemetry text values get the same treatment as tool inputs/outputs:
 # base64/binary sanitization (always) plus built-in secret redaction (when
 # enabled). Previously these fields only saw redact_secrets_in_string, so a
@@ -266,6 +289,7 @@ def _assemble_tool_call_event(
     finished_at: str,
     workflow_run_id: str | None,
     capability_request: bool,
+    request_meta: Any = None,
 ) -> AnalyticsIngestEvent:
     candidate_input = candidate.get("input")
     input_preview, _ = truncate_utf8(stringify_preview(candidate_input), MAX_PREVIEW_BYTES)
@@ -293,6 +317,7 @@ def _assemble_tool_call_event(
     }
     if capability_request:
         metadata["capability_request"] = True
+    metadata.update(_request_meta_metadata(request_meta))
 
     return {
         **_workflow_stamp(workflow_run_id),
@@ -334,6 +359,7 @@ def build_tool_call_event(
     capability_request: bool = False,
     redact: RedactFunction | None = None,
     redact_secrets: bool = True,
+    request_meta: Any = None,
 ) -> AnalyticsIngestEvent:
     candidate = _prepare_tool_call_candidate(
         tool_name=tool_name,
@@ -355,6 +381,7 @@ def build_tool_call_event(
         finished_at=finished_at,
         workflow_run_id=workflow_run_id,
         capability_request=capability_request,
+        request_meta=request_meta,
     )
 
 
@@ -377,6 +404,7 @@ async def finalize_tool_call_event(
     redact: RedactFunction | None = None,
     redact_secrets: bool = True,
     redact_event: RedactEventHook | None = None,
+    request_meta: Any = None,
 ) -> AnalyticsIngestEvent | None:
     candidate = _prepare_tool_call_candidate(
         tool_name=tool_name,
@@ -414,6 +442,7 @@ async def finalize_tool_call_event(
         finished_at=finished_at,
         workflow_run_id=workflow_run_id,
         capability_request=capability_request,
+        request_meta=request_meta,
     )
 
 

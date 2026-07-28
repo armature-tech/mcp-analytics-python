@@ -17,6 +17,15 @@ from .capability import (
     request_capability_registration,
 )
 from .recorder import AnalyticsRecorder, create_analytics_recorder
+from .sdk_v2 import (
+    ARMATURE_CTX_KWARG,
+    apply_capture_to_context,
+    capture_from_context_object,
+    capture_from_fastmcp_ambient,
+    installed_mcp_major,
+    warn_mcp2_context_gap,
+    warn_mcp2_unknown_server,
+)
 from .schema import (
     append_telemetry_hint,
     create_telemetry_json_schema,
@@ -140,6 +149,75 @@ def _resolved_signature(func: Any) -> inspect.Signature | None:
 def _is_standalone_fastmcp(server: Any) -> bool:
     module = getattr(type(server), "__module__", "") or ""
     return module == "fastmcp" or module.startswith("fastmcp.")
+
+
+def _is_official_mcpserver(server: Any) -> bool:
+    # SDK v2's renamed server class (`mcp.server.mcpserver.MCPServer`).
+    module = getattr(type(server), "__module__", "") or ""
+    return module.startswith("mcp.server.mcpserver")
+
+
+# Import-once cache for the SDK v2 Context class used to annotate the
+# appended wrapper parameter (the SDK finds the injection target through
+# typing.get_type_hints, so the annotation must be the real class).
+_MCPSERVER_CONTEXT_UNSET = object()
+_mcpserver_context_class: Any = _MCPSERVER_CONTEXT_UNSET
+
+
+def _load_mcpserver_context_class() -> Any:
+    global _mcpserver_context_class
+    if _mcpserver_context_class is _MCPSERVER_CONTEXT_UNSET:
+        try:
+            from mcp.server.mcpserver import Context
+
+            _mcpserver_context_class = Context
+        except Exception:
+            _mcpserver_context_class = None
+    return _mcpserver_context_class
+
+
+def _annotation_mentions_context(annotation: Any, context_class: type) -> bool:
+    if inspect.isclass(annotation) and issubclass(annotation, context_class):
+        return True
+    for argument in getattr(annotation, "__args__", ()) or ():
+        if inspect.isclass(argument) and issubclass(argument, context_class):
+            return True
+    return False
+
+
+def _signature_with_injected_context(signature: inspect.Signature) -> inspect.Signature:
+    """Append the adapter's keyword-only Context parameter for SDK v2 servers.
+
+    The v2 MCPServer injects the per-request Context only into a parameter
+    annotated with its Context class — there is no ambient ContextVar any
+    more. When the customer function declares no such parameter, the wrapper
+    grows one (skipped from the advertised schema by the SDK's own
+    context_kwarg handling) so per-request headers and `_meta` still reach
+    the recorder. When the customer already declares one, their parameter is
+    the injection target and the wrapper reads the object from call kwargs.
+    """
+    context_class = _load_mcpserver_context_class()
+    if context_class is None or ARMATURE_CTX_KWARG in signature.parameters:
+        return signature
+    for parameter in signature.parameters.values():
+        if _annotation_mentions_context(parameter.annotation, context_class):
+            return signature
+    context_parameter = inspect.Parameter(
+        ARMATURE_CTX_KWARG,
+        inspect.Parameter.KEYWORD_ONLY,
+        default=None,
+        annotation=context_class,
+    )
+    parameters = list(signature.parameters.values())
+    insert_at = len(parameters)
+    for index, parameter in enumerate(parameters):
+        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+            insert_at = index
+            break
+    try:
+        return signature.replace(parameters=[*parameters[:insert_at], context_parameter, *parameters[insert_at:]])
+    except ValueError:
+        return signature
 
 
 def _signature_with_telemetry(
@@ -319,6 +397,25 @@ def _http_headers_from_transport() -> Any:
     return _http_headers_via_official_sdk()
 
 
+def _capture_from_injected_context(kwargs: dict[str, Any]) -> Any:
+    # Injected-context era (SDK v2 / fastmcp 4): the per-request context is an
+    # object handed to the tool call, not an ambient ContextVar. Scan the call
+    # kwargs for a Context-like object — the adapter-appended parameter, a
+    # customer-declared ctx, or fastmcp's injected Context — then fall back to
+    # fastmcp>=4's own ambient request ContextVar for tools without one.
+    for key in (ARMATURE_CTX_KWARG, "ctx", "context", "extra"):
+        capture = capture_from_context_object(kwargs.get(key))
+        if capture is not None:
+            return capture
+    for key, value in kwargs.items():
+        if key in (ARMATURE_CTX_KWARG, "ctx", "context", "extra"):
+            continue
+        capture = capture_from_context_object(value)
+        if capture is not None:
+            return capture
+    return capture_from_fastmcp_ambient()
+
+
 def _context_from_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:
     extra = kwargs.get("extra") or kwargs.get("ctx") or kwargs.get("context")
     context: dict[str, Any] = {}
@@ -344,12 +441,20 @@ def _context_from_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[st
         headers = _headers_from_context(source)
         if headers is not None:
             context["headers"] = headers
+    capture = _capture_from_injected_context(kwargs)
+    if capture is not None:
+        apply_capture_to_context(context, capture)
     if "headers" not in context:
         http_headers = _http_headers_from_transport()
         # `is not None`, deliberately: an empty dict still means "an HTTP
         # request is active" and must keep the stdio fallback disarmed.
         if http_headers is not None:
             context["headers"] = http_headers
+        elif capture is None and (installed_mcp_major() or 0) >= 2:
+            # mcp>=2, no injected context, no ambient context: this is the
+            # exact moment the v1 path used to silently reintroduce the
+            # all-sessions-merged bug. Warn loudly; never crash the server.
+            warn_mcp2_context_gap()
     return context
 
 
@@ -412,6 +517,10 @@ def _wrap_handler(
         @functools.wraps(func)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
             raw_args = dict(kwargs)
+            # The adapter-appended SDK v2 Context parameter is transport
+            # plumbing, not a tool argument: keep it out of recorded args and
+            # out of the customer function's call.
+            raw_args.pop(ARMATURE_CTX_KWARG, None)
             if args and isinstance(args[0], dict):
                 raw_args = dict(args[0])
             return await recorder.instrument_tool_call(
@@ -430,6 +539,7 @@ def _wrap_handler(
     @functools.wraps(func)
     async def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
         raw_args = dict(kwargs)
+        raw_args.pop(ARMATURE_CTX_KWARG, None)
         if args and isinstance(args[0], dict):
             raw_args = dict(args[0])
         return await recorder.instrument_tool_call(
@@ -466,16 +576,17 @@ def _advertised_parameters_named(server: Any, registered: Any, name: str) -> lis
             tools = getattr(holder, attribute, None)
             if isinstance(tools, dict):
                 candidates.append(tools.get(name))
-    try:
-        components = getattr(getattr(server, "local_provider", None), "_components", None)
-    except Exception:
-        components = None
-    if isinstance(components, dict):
-        candidates.extend(
-            component
-            for component in components.values()
-            if getattr(component, "name", None) == name
-        )
+    for provider_attribute in ("local_provider", "_local_provider"):
+        try:
+            components = getattr(getattr(server, provider_attribute, None), "_components", None)
+        except Exception:
+            components = None
+        if isinstance(components, dict):
+            candidates.extend(
+                component
+                for component in components.values()
+                if getattr(component, "name", None) == name
+            )
     found: list[dict[str, Any]] = []
     for candidate in candidates:
         parameters = getattr(candidate, "parameters", None)
@@ -543,6 +654,15 @@ def instrument_fastmcp(server: Any, config: AnalyticsConfig | None = None) -> Fa
     original_tool = getattr(server, "tool", None)
     if not callable(original_tool):
         raise TypeError("instrument_fastmcp expects a FastMCP-like object with a callable .tool attribute.")
+    if (
+        (installed_mcp_major() or 0) >= 2
+        and not _is_official_mcpserver(server)
+        and not _is_standalone_fastmcp(server)
+    ):
+        # Under SDK v2 the adapter can only recover per-request context from
+        # recognized server surfaces; anything else silently degrades session
+        # attribution, so say so loudly up front (never crash).
+        warn_mcp2_unknown_server(server)
     supports_schema_kwargs = _supports_schema_kwargs(original_tool)
 
     should_inject_request_capability = request_capability_enabled(config)
@@ -580,12 +700,17 @@ def instrument_fastmcp(server: Any, config: AnalyticsConfig | None = None) -> Fa
         capability_parameter = request_signature.parameters["capability"].replace(
             annotation=_capability_annotation()
         )
-        wrapped_request_capability.__signature__ = request_signature.replace(
-            parameters=[capability_parameter]
-        )
+        capability_signature = request_signature.replace(parameters=[capability_parameter])
+        if _is_official_mcpserver(server):
+            capability_signature = _signature_with_injected_context(capability_signature)
+        wrapped_request_capability.__signature__ = capability_signature
         wrapped_request_capability.__annotations__ = {
             **getattr(wrapped_request_capability, "__annotations__", {}),
-            "capability": capability_parameter.annotation,
+            **{
+                parameter.name: parameter.annotation
+                for parameter in capability_signature.parameters.values()
+                if parameter.annotation is not inspect.Parameter.empty
+            },
         }
         capability_kwargs: dict[str, Any] = {
             "name": REQUEST_CAPABILITY_TOOL_NAME,
@@ -656,6 +781,15 @@ def instrument_fastmcp(server: Any, config: AnalyticsConfig | None = None) -> Fa
                     func, config, annotation=dict[str, Any] | None
                 )
                 scrub_signature_attached = wrapped_signature is not None
+            if _is_official_mcpserver(server):
+                # SDK v2 injects the request context only into a
+                # Context-annotated parameter; make sure the wrapper has one
+                # in every telemetry mode (owned/scrub included) so session
+                # attribution never depends on the removed ambient ContextVar.
+                if wrapped_signature is None:
+                    wrapped_signature = _resolved_signature(func)
+                if wrapped_signature is not None:
+                    wrapped_signature = _signature_with_injected_context(wrapped_signature)
             if wrapped_signature is not None:
                 wrapped.__signature__ = wrapped_signature
                 # Mirror the resolved signature into __annotations__ too:

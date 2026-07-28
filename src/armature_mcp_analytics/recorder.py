@@ -228,6 +228,7 @@ class AnalyticsRecorder:
         client_info: McpClientInfo | None = None,
         workflow_run_id: str | None = None,
         capability_request: bool = False,
+        request_meta: Any = None,
     ) -> None:
         # Single choke point for capture-off and field ownership
         # (TELEMETRY-CONTRACT.md): telemetry handed in by any path —
@@ -283,6 +284,7 @@ class AnalyticsRecorder:
                 finished_at=finished,
                 workflow_run_id=effective_workflow_run_id,
                 capability_request=capability_request,
+                request_meta=request_meta,
                 redact=_config_value(self.config, "redact", "redact"),
                 redact_secrets=_config_value(self.config, "redact_secrets", "redactSecrets", True) is not False,
                 redact_event=_config_value(self.config, "redact_event", "redactEvent"),
@@ -437,6 +439,7 @@ class AnalyticsRecorder:
                 "request_id": context.get("requestId") or context.get("request_id"),
                 "client_info": context.get("clientInfo") or context.get("client_info"),
                 "workflow_run_id": context.get("workflowRunId") or context.get("workflow_run_id"),
+                "request_meta": context.get("requestMeta") or context.get("request_meta"),
                 "capability_request": tool.internal,
             },
             handler,

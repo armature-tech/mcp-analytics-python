@@ -50,3 +50,45 @@ jobs:
         env:
           ARMATURE_REQUIRE_FASTMCP: "1"
         run: python scripts/run_publish_canary.py --fastmcp-major "${{ matrix.fastmcp-major }}"
+
+  # SDK v2 era (MCP spec 2026-07-28). Two legs because fastmcp 4 pre-releases
+  # hard-pin an exact mcp 2.x build (4.0.0a2 -> mcp==2.0.0b2), so the newest
+  # official SDK and fastmcp 4 cannot share one environment yet.
+  checks-v2:
+    name: Python ${{ matrix.python-version }} / ${{ matrix.flavor }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+        flavor: ["official-mcp2", "fastmcp4"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install test dependencies
+        run: |
+          # Prefer the stable 2.x once released; fall back to the newest
+          # pre-release while only rc/beta builds exist.
+          if [[ "${{ matrix.flavor }}" == "official-mcp2" ]]; then
+            python -m pip install 'mcp>=2,<3' || python -m pip install --pre 'mcp>=2.0.0rc1,<3'
+          else
+            python -m pip install --pre 'fastmcp>=4.0.0a2,<5'
+          fi
+
+      - name: Run checks
+        env:
+          ARMATURE_REQUIRE_MCP2: "1"
+          ARMATURE_REQUIRE_FASTMCP4: ${{ matrix.flavor == 'fastmcp4' && '1' || '' }}
+        run: PYTHONPATH=src python -m unittest discover -s tests

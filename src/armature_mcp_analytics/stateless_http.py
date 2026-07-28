@@ -4,17 +4,71 @@ The identity-bearing session ID format intentionally matches the TypeScript
 and Go SDKs. MCP clients echo the server-issued ``Mcp-Session-Id`` on later
 requests, allowing each cold invocation to recover the client name/version
 without a shared session store.
+
+Handshake era only. The MCP 2026-07-28 revision has no ``initialize``
+request and no ``Mcp-Session-Id`` at all: client identity travels
+per-request in ``params._meta`` and session identity comes from the
+``gen_ai.conversation.id`` baggage entry / ``x-armature-session-seed``
+header (see ``sdk_v2``). This scheme is deliberately NOT ported to that
+era — there is no handshake response to attach a minted ID to, and
+minting a fallback per POST would fabricate one single-request session
+per tool call. The middleware detects modern-era requests, logs a one-time
+warning, and passes them through untouched; legacy (handshake-era)
+behavior is unchanged.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from .types import Headers, JsonDict, McpClientInfo
+
+logger = logging.getLogger("armature_mcp_analytics")
+
+# Reserved `_meta` envelope key marking a stateless-era (2026-07-28+) request.
+# Kept as a literal so this module stays dependency-free; the canonical
+# constant lives in `mcp_types` / `armature_mcp_analytics.sdk_v2`.
+_PROTOCOL_VERSION_META_KEY = "io.modelcontextprotocol/protocolVersion"
+_FIRST_MODERN_PROTOCOL_VERSION = "2026-07-28"
+
+_warned_modern_era = False
+
+
+def _warn_modern_era_once() -> None:
+    global _warned_modern_era
+    if _warned_modern_era:
+        return
+    _warned_modern_era = True
+    logger.warning(
+        "armature-mcp-analytics: StatelessHttpSessionMiddleware saw a "
+        "modern-era (MCP 2026-07-28+) request. The stateless session-id "
+        "scheme is handshake-era only — minting per-request IDs here would "
+        "fabricate a one-request session per tool call — so the middleware "
+        "is a no-op for these requests. Session identity for the modern era "
+        "comes from the request _meta envelope (gen_ai.conversation.id "
+        "baggage) or the x-armature-session-seed header via the instrumented "
+        "server; the middleware can be removed once all clients are modern."
+    )
+
+
+def _is_modern_era_request(body: Any, headers: Headers | None) -> bool:
+    messages = body if isinstance(body, list) else [body]
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        params = message.get("params")
+        meta = params.get("_meta") if isinstance(params, dict) else None
+        if isinstance(meta, dict) and _PROTOCOL_VERSION_META_KEY in meta:
+            return True
+    version = _header_value(headers, "mcp-protocol-version")
+    # Protocol revisions are ISO dates, so lexical order is chronological;
+    # this stays correct for revisions newer than the first modern one.
+    return bool(version) and version >= _FIRST_MODERN_PROTOCOL_VERSION
 
 _SESSION_ID_RE = re.compile(
     r"^mcp_([A-Za-z0-9.-]+)_v_([A-Za-z0-9.-]*)_"
@@ -221,11 +275,16 @@ class StatelessHttpSessionMiddleware:
             key.decode("latin-1"): value.decode("latin-1")
             for key, value in headers_list
         }
-        session = (
-            resolve_stateless_http_session(body=body, headers=decoded_headers)
-            if body is not None
-            else None
-        )
+        if body is not None and _is_modern_era_request(body, decoded_headers):
+            # Modern era: no initialize to answer, no Mcp-Session-Id to echo,
+            # and minting one per POST would fabricate single-request
+            # sessions. No-op (see module docstring).
+            _warn_modern_era_once()
+            session = None
+        elif body is not None:
+            session = resolve_stateless_http_session(body=body, headers=decoded_headers)
+        else:
+            session = None
         initialize = _find_initialize(body)
         initialize_request_id = initialize.get("id") if initialize else None
 
