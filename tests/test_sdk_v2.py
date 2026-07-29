@@ -34,7 +34,9 @@ from armature_mcp_analytics.sdk_v2 import (
     ARMATURE_CTX_KWARG,
     RequestContextCapture,
     capture_from_context_object,
+    capture_from_request_context,
     client_info_from_meta,
+    client_info_from_session,
     parse_baggage,
     resolve_session_key,
 )
@@ -85,10 +87,51 @@ class _FakeRequest:
 
 
 class _FakeRequestContext:
-    def __init__(self, meta: dict | None, request: _FakeRequest | None, protocol_version: str = "2026-07-28") -> None:
+    def __init__(
+        self,
+        meta: dict | None,
+        request: _FakeRequest | None,
+        protocol_version: str = "2026-07-28",
+        session: object | None = None,
+    ) -> None:
         self.meta = meta
         self.request = request
         self.protocol_version = protocol_version
+        if session is not None:
+            # Only handshake-era fakes carry a session; stateless-era fakes
+            # keep the attribute absent, like a context without one.
+            self.session = session
+
+
+class _FakeClientInfo:
+    def __init__(self, name: str | None = None, version: str | None = None) -> None:
+        self.name = name
+        self.version = version
+
+
+class _FakeClientParams:
+    """Attribute-shaped InitializeRequestParams stand-in (pydantic style)."""
+
+    def __init__(
+        self,
+        client_info: object | None = None,
+        protocol_version: str | None = None,
+        capabilities: object | None = None,
+    ) -> None:
+        self.clientInfo = client_info
+        self.protocolVersion = protocol_version
+        self.capabilities = capabilities
+
+
+class _FakeServerSession:
+    def __init__(self, client_params: object | None = None) -> None:
+        self.client_params = client_params
+
+
+class _RaisingClientParamsSession:
+    @property
+    def client_params(self):
+        raise RuntimeError("session torn down")
 
 
 class _FakeInjectedContext:
@@ -172,6 +215,91 @@ class BaggageAndLadderTests(unittest.TestCase):
         self.assertIsInstance(capture, RequestContextCapture)
         self.assertFalse(capture.has_http_request)
         self.assertIsNone(capture.meta)
+
+
+class HandshakeSessionIdentityTests(unittest.TestCase):
+    """Identity retained on the transport session as ``client_params``.
+
+    Handshake-era (stateful) servers process ``initialize`` inside the
+    transport; the adapter recovers the identity at tool-call time from the
+    session object. Environment-independent: everything is duck-typed.
+    """
+
+    def test_full_identity_from_attribute_shaped_params(self) -> None:
+        session = _FakeServerSession(
+            _FakeClientParams(
+                _FakeClientInfo("attribution-check", "9.9.9"),
+                protocol_version="2025-06-18",
+                capabilities={"tools": {}},
+            )
+        )
+        self.assertEqual(
+            client_info_from_session(session),
+            {
+                "name": "attribution-check",
+                "version": "9.9.9",
+                "protocolVersion": "2025-06-18",
+                "capabilities": {"tools": {}},
+            },
+        )
+
+    def test_mapping_shaped_params(self) -> None:
+        session = _FakeServerSession(
+            {
+                "clientInfo": {"name": "map-client", "version": "1.0"},
+                "protocolVersion": "2025-03-26",
+            }
+        )
+        info = client_info_from_session(session)
+        self.assertEqual(info["name"], "map-client")
+        self.assertEqual(info["version"], "1.0")
+        self.assertEqual(info["protocolVersion"], "2025-03-26")
+
+    def test_pydantic_capabilities_are_dumped(self) -> None:
+        class _Caps:
+            def model_dump(self, by_alias: bool = False, exclude_none: bool = False):
+                return {"sampling": {}}
+
+        info = client_info_from_session(
+            _FakeServerSession(_FakeClientParams(None, "2025-06-18", _Caps()))
+        )
+        self.assertEqual(info["capabilities"], {"sampling": {}})
+        self.assertNotIn("name", info)
+
+    def test_absent_session_or_params_degrades_to_none(self) -> None:
+        # Stateless-era sessions, fakes without the attribute, torn-down
+        # sessions: all degrade to "no identity", never a crash.
+        self.assertIsNone(client_info_from_session(None))
+        self.assertIsNone(client_info_from_session(object()))
+        self.assertIsNone(client_info_from_session(_FakeServerSession(None)))
+        self.assertIsNone(client_info_from_session(_RaisingClientParamsSession()))
+
+    def test_blank_identity_fields_yield_none(self) -> None:
+        info = client_info_from_session(
+            _FakeServerSession(
+                _FakeClientParams(_FakeClientInfo("  ", ""), protocol_version=" ")
+            )
+        )
+        self.assertIsNone(info)
+
+    def test_capture_reads_session_identity(self) -> None:
+        capture = capture_from_request_context(
+            _FakeRequestContext(
+                None,
+                _FakeRequest({"mcp-session-id": "legacy-7"}),
+                session=_FakeServerSession(
+                    _FakeClientParams(_FakeClientInfo("cap-client", "1.2.3"), "2025-06-18")
+                ),
+            )
+        )
+        self.assertEqual(capture.client_info["name"], "cap-client")
+        self.assertEqual(capture.client_info["version"], "1.2.3")
+
+    def test_capture_without_session_attribute_has_no_identity(self) -> None:
+        capture = capture_from_request_context(
+            _FakeRequestContext(_modern_meta(), _FakeRequest({}))
+        )
+        self.assertIsNone(capture.client_info)
 
 
 class RequestMetaCapTests(unittest.TestCase):
@@ -298,6 +426,68 @@ class InjectedContextPipelineTests(unittest.TestCase):
         session_init = next(event for event in events if event["kind"] == "session_init")
         self.assertIsNone(session_init["metadata"]["client_name"])
         self.assertEqual(session_init["metadata"]["protocol_version"], "2026-07-28")
+
+    def test_handshake_session_identity_reaches_session_init_and_tool_calls(self) -> None:
+        # Stateful (handshake-era) request: no `_meta` envelope, identity
+        # lives on the transport session as client_params. It must land on
+        # the deduped session_init AND on the tool_call metadata.
+        session = _FakeServerSession(
+            _FakeClientParams(
+                _FakeClientInfo("attribution-check", "9.9.9"),
+                protocol_version="2025-06-18",
+                capabilities={"tools": {}},
+            )
+        )
+        ctx = _FakeInjectedContext(
+            _FakeRequestContext(
+                None,
+                _FakeRequest({"mcp-session-id": "handshake-1"}),
+                session=session,
+            )
+        )
+        events = self._run_tool(ctx)
+        session_init = next(event for event in events if event["kind"] == "session_init")
+        self.assertEqual(session_init["session_id_hint"], "handshake-1")
+        self.assertEqual(session_init["metadata"]["client_name"], "attribution-check")
+        self.assertEqual(session_init["metadata"]["client_version"], "9.9.9")
+        self.assertEqual(session_init["metadata"]["protocol_version"], "2025-06-18")
+        self.assertEqual(session_init["metadata"]["capabilities"], {"tools": {}})
+        tool_call = next(event for event in events if event["kind"] == "tool_call")
+        self.assertEqual(tool_call["metadata"]["client_name"], "attribution-check")
+        self.assertEqual(tool_call["metadata"]["client_version"], "9.9.9")
+        self.assertEqual(tool_call["metadata"]["protocol_version"], "2025-06-18")
+
+    def test_meta_identity_beats_handshake_session_identity(self) -> None:
+        # Dual-era server: a modern request's per-request `_meta` identity is
+        # authoritative over whatever handshake the transport retained.
+        session = _FakeServerSession(
+            _FakeClientParams(_FakeClientInfo("handshake-client", "0.0.1"), "2025-06-18")
+        )
+        ctx = _FakeInjectedContext(
+            _FakeRequestContext(
+                _modern_meta(client={"name": "modern-client", "version": "2.0"}),
+                _FakeRequest({"mcp-session-id": "dual-era-1"}),
+                session=session,
+            )
+        )
+        events = self._run_tool(ctx)
+        session_init = next(event for event in events if event["kind"] == "session_init")
+        self.assertEqual(session_init["metadata"]["client_name"], "modern-client")
+        self.assertEqual(session_init["metadata"]["client_version"], "2.0")
+
+    def test_context_without_session_keeps_current_behavior(self) -> None:
+        # Synthetic context without a transport session and without session
+        # signals: no crash, no fabricated identity, and no bogus
+        # session_init for a session id that does not exist.
+        ctx = _FakeInjectedContext(
+            _FakeRequestContext(None, _FakeRequest({"user-agent": "qa"}))
+        )
+        events = self._run_tool(ctx)
+        self.assertEqual([event["kind"] for event in events], ["tool_call"])
+        tool_call = events[0]
+        self.assertIsNone(tool_call["session_id_hint"])
+        self.assertNotIn("client_name", tool_call["metadata"])
+        self.assertNotIn("client_version", tool_call["metadata"])
 
     def test_oversized_request_meta_truncated_in_event(self) -> None:
         ctx = _FakeInjectedContext(

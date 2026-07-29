@@ -2,6 +2,36 @@
 
 ## Unreleased
 
+### Client attribution for stateful (handshake-era) servers
+
+Stateful servers process the `initialize` handshake inside their transport,
+so the adapter never observed `clientInfo` and sessions surfaced with
+Client "Unknown" — telemetry and session ids were perfect, identity was
+null. This affected standalone fastmcp 2.x/3.x (HTTP transport, stateful)
+and official-SDK `mcp.server.fastmcp` servers with `stateless_http=False`
+(both verified live).
+
+- **Handshake identity is now recovered at tool-call time** from the
+  transport session: the SDK's `ServerSession` retains the `initialize`
+  params as `session.client_params` (`clientInfo` name/version,
+  `protocolVersion`, `capabilities`). The adapter reads it duck-typed and
+  exception-safe from the injected/captured request context's `session`, or
+  — for v1 ambient surfaces (standalone fastmcp 2/3 and
+  `mcp.server.fastmcp`, both built on the v1 lowlevel server) — from the
+  ambient `request_ctx` ContextVar. Stateless-era per-request `_meta`
+  identity stays authoritative when both exist.
+- **`session_init` now carries the identity** on the first recorded call of
+  each session (same process-local per-session dedup as before: exactly one
+  `session_init` per session id), so ingest coalesces
+  `client_name`/`client_version`/`protocol_version`/`capabilities` onto the
+  session row.
+- **Tool_call events are stamped with `client_name`/`client_version`/
+  `protocol_version` too** when known (TypeScript v2-adapter parity),
+  feeding the ingest work-event coalesce. Absent identity keeps today's
+  event shape — no null-filled keys, no fabricated `session_init`.
+- Covers stdio servers as well: the retained handshake now attributes the
+  process-scoped stdio session's client.
+
 ### MCP SDK v2 / spec 2026-07-28 support
 
 The MCP 2026-07-28 revision is stateless: no `initialize` handshake, no

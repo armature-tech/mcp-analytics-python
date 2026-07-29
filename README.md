@@ -188,6 +188,21 @@ per-request context (for example a hand-rolled server object), the SDK logs a
 loud one-time warning that session attribution will degrade — it never
 crashes the host server.
 
+### Client attribution in the handshake era (stateful servers)
+
+Stateful servers handle the `initialize` handshake inside their transport,
+so the wrapper never sees it. The SDK recovers the client identity at
+tool-call time from the transport session, which retains the handshake as
+`session.client_params`: client name/version, the negotiated protocol
+version, and capabilities. The identity is emitted once per session on the
+deduplicated `session_init` event and also stamped on each tool_call
+event's metadata (`client_name`, `client_version`, `protocol_version`), so
+dashboards attribute the session's client instead of showing "Unknown".
+This works for standalone FastMCP (2.x/3.x, HTTP or stdio), the official
+SDK's `mcp.server.fastmcp` (with or without `stateless_http`), and the SDK
+v2 / fastmcp 4 injected-context surfaces. When no handshake was observed
+(stateless era, in-process calls), behavior is unchanged.
+
 ### Custom dispatcher
 
 Use the recorder when you manage **tools/list** and **tools/call** yourself:

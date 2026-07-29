@@ -285,6 +285,7 @@ class AnalyticsRecorder:
                 workflow_run_id=effective_workflow_run_id,
                 capability_request=capability_request,
                 request_meta=request_meta,
+                client_info=client_info,
                 redact=_config_value(self.config, "redact", "redact"),
                 redact_secrets=_config_value(self.config, "redact_secrets", "redactSecrets", True) is not False,
                 redact_event=_config_value(self.config, "redact_event", "redactEvent"),

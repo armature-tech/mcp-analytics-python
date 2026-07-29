@@ -155,6 +155,9 @@ class RequestContextCapture:
     meta: dict[str, Any] | None = None  # raw request `_meta`, verbatim
     has_http_request: bool = False
     protocol_version: str | None = None
+    # Handshake identity retained on the transport session (stateful era);
+    # None on stateless-era requests and whenever no handshake was observed.
+    client_info: McpClientInfo | None = None
 
 
 def _meta_as_dict(meta: Any) -> dict[str, Any] | None:
@@ -171,6 +174,73 @@ def _meta_as_dict(meta: Any) -> dict[str, Any] | None:
         except Exception:
             return None
     return None
+
+
+def _field(obj: Any, name: str) -> Any:
+    # Handshake payloads surface either as pydantic models (attribute access)
+    # or plain mappings (fakes, pre-parsed JSON); read both shapes.
+    if isinstance(obj, Mapping):
+        return obj.get(name)
+    return getattr(obj, name, None)
+
+
+def _capabilities_as_json(capabilities: Any) -> dict[str, Any] | None:
+    if isinstance(capabilities, Mapping):
+        return dict(capabilities)
+    dump = getattr(capabilities, "model_dump", None)
+    if callable(dump):
+        try:
+            dumped = dump(by_alias=True, exclude_none=True)
+            return dict(dumped) if isinstance(dumped, Mapping) else None
+        except Exception:
+            return None
+    return None
+
+
+def client_info_from_session(session: Any) -> McpClientInfo | None:
+    """Client identity from the handshake retained on the transport session.
+
+    Handshake-era (stateful) servers process ``initialize`` inside the
+    transport, so the adapter never observes it directly — but the SDK's
+    ``ServerSession`` retains the whole ``InitializeRequestParams`` as
+    ``session.client_params``: ``clientInfo`` (name/version),
+    ``protocolVersion``, ``capabilities``. Tool-call time is therefore the
+    first (and only) chance to recover the identity that the transport
+    already validated.
+
+    Duck-typed and exception-safe across every verified surface: mcp 1.x
+    ``ServerSession`` (standalone fastmcp 2/3 and ``mcp.server.fastmcp``
+    both run on the v1 lowlevel server) and mcp 2's ``ServerSession``
+    (``client_params`` proxies the transport connection; None on genuinely
+    stateless requests). Absent/None ``client_params`` — stateless era,
+    in-process fakes, no handshake yet — yields None, never a crash.
+    """
+    if session is None:
+        return None
+    try:
+        params = _field(session, "client_params")
+    except Exception:
+        return None
+    if params is None:
+        return None
+    try:
+        result: McpClientInfo = {}
+        info = _field(params, "clientInfo")
+        name = _field(info, "name") if info is not None else None
+        if isinstance(name, str) and name.strip():
+            result["name"] = name
+        version = _field(info, "version") if info is not None else None
+        if isinstance(version, str) and version.strip():
+            result["version"] = version
+        protocol_version = _field(params, "protocolVersion")
+        if isinstance(protocol_version, str) and protocol_version.strip():
+            result["protocolVersion"] = protocol_version
+        capabilities = _capabilities_as_json(_field(params, "capabilities"))
+        if capabilities is not None:
+            result["capabilities"] = capabilities
+        return result or None
+    except Exception:
+        return None
 
 
 def capture_from_context_object(candidate: Any) -> RequestContextCapture | None:
@@ -209,11 +279,16 @@ def capture_from_request_context(request_context: Any) -> RequestContextCapture:
     request = getattr(request_context, "request", None)
     headers = getattr(request, "headers", None)
     protocol_version = getattr(request_context, "protocol_version", None)
+    try:
+        session_client_info = client_info_from_session(getattr(request_context, "session", None))
+    except Exception:
+        session_client_info = None
     return RequestContextCapture(
         headers=headers,
         meta=meta,
         has_http_request=request is not None,
         protocol_version=protocol_version if isinstance(protocol_version, str) else None,
+        client_info=session_client_info,
     )
 
 
@@ -331,7 +406,11 @@ def apply_capture_to_context(context: dict[str, Any], capture: RequestContextCap
     session_key = resolve_session_key(capture.meta, capture.headers)
     if session_key:
         context.setdefault("session_id", session_key)
-    client_info = client_info_from_meta(capture.meta, capture.protocol_version)
+    # Per-request `_meta` identity (stateless era) is authoritative; the
+    # handshake identity retained on the transport session (stateful era)
+    # fills in when no envelope carried one. On stateless requests
+    # `capture.client_info` is None, so the two eras never fight.
+    client_info = client_info_from_meta(capture.meta, capture.protocol_version) or capture.client_info
     if client_info:
         context.setdefault("client_info", client_info)
     if capture.meta:

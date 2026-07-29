@@ -290,6 +290,7 @@ def _assemble_tool_call_event(
     workflow_run_id: str | None,
     capability_request: bool,
     request_meta: Any = None,
+    client_info: McpClientInfo | None = None,
 ) -> AnalyticsIngestEvent:
     candidate_input = candidate.get("input")
     input_preview, _ = truncate_utf8(stringify_preview(candidate_input), MAX_PREVIEW_BYTES)
@@ -317,6 +318,21 @@ def _assemble_tool_call_event(
     }
     if capability_request:
         metadata["capability_request"] = True
+    # Client identity on tool_call events too — not only session_init — so
+    # ingest's work-event coalesce can attribute the client even when the
+    # session_init raced or was deduped by another process (TS-adapter
+    # parity: same metadata keys as session_init). Stamped only when known;
+    # never null-filled, so absent identity keeps today's shape.
+    info = client_info or {}
+    client_name = _trim_or_none(info.get("name"))
+    if client_name is not None:
+        metadata["client_name"] = client_name
+    client_version = _trim_or_none(info.get("version"))
+    if client_version is not None:
+        metadata["client_version"] = client_version
+    protocol_version = _trim_or_none(info.get("protocolVersion"))
+    if protocol_version is not None:
+        metadata["protocol_version"] = protocol_version
     metadata.update(_request_meta_metadata(request_meta))
 
     return {
@@ -360,6 +376,7 @@ def build_tool_call_event(
     redact: RedactFunction | None = None,
     redact_secrets: bool = True,
     request_meta: Any = None,
+    client_info: McpClientInfo | None = None,
 ) -> AnalyticsIngestEvent:
     candidate = _prepare_tool_call_candidate(
         tool_name=tool_name,
@@ -382,6 +399,7 @@ def build_tool_call_event(
         workflow_run_id=workflow_run_id,
         capability_request=capability_request,
         request_meta=request_meta,
+        client_info=client_info,
     )
 
 
@@ -405,6 +423,7 @@ async def finalize_tool_call_event(
     redact_secrets: bool = True,
     redact_event: RedactEventHook | None = None,
     request_meta: Any = None,
+    client_info: McpClientInfo | None = None,
 ) -> AnalyticsIngestEvent | None:
     candidate = _prepare_tool_call_candidate(
         tool_name=tool_name,
@@ -443,6 +462,7 @@ async def finalize_tool_call_event(
         workflow_run_id=workflow_run_id,
         capability_request=capability_request,
         request_meta=request_meta,
+        client_info=client_info,
     )
 
 

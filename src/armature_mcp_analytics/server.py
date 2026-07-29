@@ -22,6 +22,7 @@ from .sdk_v2 import (
     apply_capture_to_context,
     capture_from_context_object,
     capture_from_fastmcp_ambient,
+    client_info_from_session,
     installed_mcp_major,
     warn_mcp2_context_gap,
     warn_mcp2_unknown_server,
@@ -386,6 +387,31 @@ def _http_headers_via_official_sdk() -> Any:
     return {} if session_id is None else {"mcp-session-id": session_id}
 
 
+def _client_info_via_ambient_session() -> Any:
+    # Handshake-era stateful servers (standalone fastmcp 2/3 over HTTP or
+    # stdio, official-SDK FastMCP with stateless_http True or False) handle
+    # `initialize` inside the transport, so the adapter never observes the
+    # handshake — but the v1 lowlevel server binds its ambient `request_ctx`
+    # around every handler, and that RequestContext's `.session` is the
+    # ServerSession retaining the handshake as `client_params`. Both FastMCP
+    # flavors run on the v1 lowlevel server, so one ambient read covers both.
+    # Injected-context surfaces (SDK v2 / fastmcp 4) never reach this: their
+    # capture already carries the session identity.
+    request_ctx = _load_official_sdk_request_ctx()
+    if request_ctx is None:
+        return None
+    try:
+        context = request_ctx.get()
+    except Exception:
+        # LookupError: no active MCP request (in-process call) — no
+        # handshake identity to recover; degrade silently.
+        return None
+    try:
+        return client_info_from_session(getattr(context, "session", None))
+    except Exception:
+        return None
+
+
 def _http_headers_from_transport() -> Any:
     # fastmcp first: when it is the serving framework its accessor sees the
     # request. A None there means "fastmcp absent or no fastmcp HTTP request",
@@ -455,6 +481,13 @@ def _context_from_call(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[st
             # exact moment the v1 path used to silently reintroduce the
             # all-sessions-merged bug. Warn loudly; never crash the server.
             warn_mcp2_context_gap()
+    if "client_info" not in context:
+        # Stateful handshake identity: the transport-held session retains the
+        # initialize params the adapter never saw. Fills client attribution
+        # for the session_init that build_batch dedups per session id.
+        ambient_client_info = _client_info_via_ambient_session()
+        if ambient_client_info:
+            context["client_info"] = ambient_client_info
     return context
 
 
