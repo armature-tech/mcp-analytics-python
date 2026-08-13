@@ -282,6 +282,12 @@ preserves the echoed `Mcp-Session-Id` on later cold invocations. The recorder
 then recovers the client identity without a session store. Continue to use
 `delivery: "await"` in request-scoped deployments.
 
+A client that never echoes the header still gets served; its calls simply
+keep a null session hint, and ingest groups them by actor + client. The
+middleware does not invent an id for those requests: a fresh id per POST is
+trusted verbatim by ingest, which would record one single-event session per
+tool call.
+
 Custom transports can use the lower-level API directly:
 
 ~~~python

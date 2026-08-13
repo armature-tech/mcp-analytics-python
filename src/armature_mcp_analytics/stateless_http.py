@@ -5,6 +5,15 @@ and Go SDKs. MCP clients echo the server-issued ``Mcp-Session-Id`` on later
 requests, allowing each cold invocation to recover the client name/version
 without a shared session store.
 
+A handshake-era request that carries neither an ``initialize`` message nor
+an echoed ``Mcp-Session-Id`` resolves to no session id at all. Minting one
+would stamp a distinct id on every POST; ingest trusts an explicit hint, so
+each tool call became its own single-event session and the server-side
+grouping never ran. Shipping ``session_id_hint: None`` instead lets ingest
+group by actor + client with its inactivity window. This matches the Go SDK
+(``ResolveStatelessHTTPSession`` returns an empty session id in the same
+case).
+
 Handshake era only. The MCP 2026-07-28 revision has no ``initialize``
 request and no ``Mcp-Session-Id`` at all: client identity travels
 per-request in ``params._meta`` and session identity comes from the
@@ -183,23 +192,44 @@ def _is_successful_initialize_response(raw: bytes, request_id: Any) -> bool:
 class StatelessHttpSession:
     """Resolved identity for one stateless MCP HTTP request."""
 
-    session_id: str
+    # ``None`` when the request carries no recoverable session identity: no
+    # initialize to mint from and no echoed ``Mcp-Session-Id`` to reuse. See
+    # ``resolve_stateless_http_session``.
+    session_id: str | None
     is_initialize: bool
     client_info: McpClientInfo | None = None
+    # Carried only so `dispatch_context` can prove the request was HTTP when
+    # no session id was recoverable. See `dispatch_context`.
+    headers: Headers | None = None
 
     @property
     def session_id_generator(self) -> Callable[[], str] | None:
         """Transport generator for initialize; ``None`` on later requests."""
 
-        if not self.is_initialize:
+        if not self.is_initialize or self.session_id is None:
             return None
-        return lambda: self.session_id
+        minted = self.session_id
+        return lambda: minted
 
     @property
     def dispatch_context(self) -> JsonDict:
         """Context fields accepted by ``AnalyticsRecorder.dispatch``."""
 
-        context: JsonDict = {"sessionId": self.session_id}
+        # ``sessionId`` is omitted rather than set to None when there is no
+        # identity: dispatch treats a missing key as "resolve it yourself"
+        # and ships `session_id_hint: None`, which is what ingest needs to
+        # apply its own grouping.
+        #
+        # The headers ride along in that case. The recorder reads "no session
+        # id AND no headers" as "no HTTP request at all" and falls back to the
+        # process-scoped stdio id, which would merge every concurrent
+        # conversation in a long-lived server into one session. Passing the
+        # headers keeps the request identifiable as HTTP-with-no-id.
+        context: JsonDict = {}
+        if self.session_id is not None:
+            context["sessionId"] = self.session_id
+        elif self.headers is not None:
+            context["headers"] = self.headers
         if self.client_info:
             context["clientInfo"] = self.client_info
         return context
@@ -221,11 +251,22 @@ def resolve_stateless_http_session(
         return StatelessHttpSession(session_id=session_id, is_initialize=True)
 
     echoed = (_header_value(headers, "mcp-session-id") or "").strip()
-    session_id = echoed or str(uuid4())
+    if not echoed:
+        # No initialize to mint from and no echo to recover: either modern-era
+        # traffic (identified through `_meta` / the session seed) or a client
+        # that drops the header. Minting here would stamp a distinct id on
+        # every POST, and ingest trusts an explicit hint, so each tool call
+        # would land in its own single-event session. Returning no id ships
+        # `session_id_hint: None` and lets ingest group by actor + client
+        # with its inactivity window instead.
+        return StatelessHttpSession(
+            session_id=None, is_initialize=False, headers=headers,
+        )
+
     return StatelessHttpSession(
-        session_id=session_id,
+        session_id=echoed,
         is_initialize=False,
-        client_info=parse_stateless_session_client_info(session_id),
+        client_info=parse_stateless_session_client_info(echoed),
     )
 
 
@@ -288,14 +329,13 @@ class StatelessHttpSessionMiddleware:
         initialize = _find_initialize(body)
         initialize_request_id = initialize.get("id") if initialize else None
 
+        # Request headers pass through untouched. The middleware used to stamp
+        # a minted `Mcp-Session-Id` onto requests that arrived without one, so
+        # the downstream recorder would read an id back off the header. That
+        # id was fresh per POST, which fragmented one conversation into one
+        # session per tool call. A request with no echo now reaches the app
+        # exactly as the client sent it, and ingest does the grouping.
         request_scope = dict(scope)
-        if (
-            session is not None
-            and not session.is_initialize
-            and not _header_value(decoded_headers, "mcp-session-id")
-        ):
-            headers_list.append((b"mcp-session-id", session.session_id.encode("ascii")))
-            request_scope["headers"] = headers_list
 
         index = 0
 

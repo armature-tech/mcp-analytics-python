@@ -124,12 +124,61 @@ class StatelessHttpTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    def test_missing_echo_falls_back_to_one_off_uuid(self) -> None:
+    def test_missing_echo_resolves_to_no_session_id(self) -> None:
+        # Regression: minting a one-off UUID here produced one trusted hint
+        # per POST, so ingest recorded a single-event session per tool call
+        # and its actor + client grouping never ran.
         session = resolve_stateless_http_session(
             body={"method": "tools/call"}, headers={}
         )
-        self.assertRegex(session.session_id, r"^[0-9a-f-]{36}$")
+        self.assertIsNone(session.session_id)
         self.assertIsNone(session.client_info)
+        self.assertIsNone(session.session_id_generator)
+        # Headers ride along so the recorder can tell "HTTP request with no
+        # session id" from "no HTTP request at all". Without them it would
+        # fall back to the process-scoped stdio id and merge every concurrent
+        # conversation in the server into one session.
+        self.assertEqual(session.dispatch_context, {"headers": {}})
+
+    def test_two_requests_without_echo_agree_on_no_session_id(self) -> None:
+        first = resolve_stateless_http_session(body={"method": "tools/call"}, headers={})
+        second = resolve_stateless_http_session(body={"method": "tools/call"}, headers={})
+        self.assertIsNone(first.session_id)
+        self.assertIsNone(second.session_id)
+
+    async def test_echo_less_dispatch_context_ships_a_null_hint_not_the_stdio_id(
+        self,
+    ) -> None:
+        # The custom-transport integration from the README: the caller spreads
+        # dispatch_context and nothing else. The event must carry no session
+        # hint, so ingest groups it — NOT the process-scoped `stdio-` id,
+        # which would merge every concurrent conversation in this process.
+        batches: list = []
+        recorder = create_analytics_recorder(
+            {
+                "armature": {
+                    "delivery": "await",
+                    "actor_id": "actor",
+                    "emit": batches.append,
+                }
+            }
+        )
+        session = resolve_stateless_http_session(
+            body={"jsonrpc": "2.0", "id": 2, "method": "tools/call"},
+            headers={"content-type": "application/json"},
+        )
+        await recorder.record_tool_call(
+            name="lookup_customer",
+            args={},
+            duration_ms=1,
+            status="ok",
+            result={"content": [{"type": "text", "text": "ok"}]},
+            **session.dispatch_context,
+        )
+        events = [event for batch in batches for event in batch["events"]]
+        tool_calls = [e for e in events if e["kind"] == "tool_call"]
+        self.assertEqual(len(tool_calls), 1)
+        self.assertIsNone(tool_calls[0]["session_id_hint"])
 
     async def test_recorder_recovers_client_identity_from_session_id(self) -> None:
         batches = []
@@ -219,9 +268,11 @@ class StatelessHttpTests(unittest.IsolatedAsyncioTestCase):
             dict(seen_scopes[-1]["headers"])[b"mcp-session-id"].decode(), session_id
         )
 
+        # No echo: the middleware must NOT stamp an id onto the request. A
+        # per-POST id is trusted verbatim by ingest, so it would split one
+        # conversation into a session per tool call.
         await invoke({"method": "tools/call"})
-        fallback = dict(seen_scopes[-1]["headers"])[b"mcp-session-id"].decode()
-        self.assertRegex(fallback, r"^[0-9a-f-]{36}$")
+        self.assertNotIn(b"mcp-session-id", dict(seen_scopes[-1]["headers"]))
 
     async def test_modern_era_request_is_a_no_op(self) -> None:
         # MCP 2026-07-28 requests have no initialize and no Mcp-Session-Id;
