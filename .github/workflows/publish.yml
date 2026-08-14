@@ -136,9 +136,21 @@ jobs:
       # hatchling, which emits Metadata-Version 2.5, and the old twine only
       # knew 2.4. Keep this pin ahead of whatever metadata version the build
       # backend emits, or pin hatchling in pyproject.toml instead.
+      #
+      # The sha MUST be the tag's COMMIT, not the tag object. v1.14.2 is an
+      # annotated tag, so `git/ref/tags/v1.14.2` returns the tag object sha
+      # (a892a5a6…) — pinning that fails at runtime with
+      # "docker: Error response from daemon: manifest unknown", because this
+      # is a Docker action and ghcr.io publishes an image per commit sha, not
+      # per tag object. Dereference with `git/tags/<sha>` to get the commit,
+      # and confirm the image resolves before merging:
+      #   curl -H "Authorization: Bearer $(curl -s \
+      #     'https://ghcr.io/token?scope=repository:pypa/gh-action-pypi-publish:pull' \
+      #     | jq -r .token)" \
+      #     https://ghcr.io/v2/pypa/gh-action-pypi-publish/manifests/<sha>
       - name: Publish
         if: steps.existing_release.outputs.published != 'true'
-        uses: pypa/gh-action-pypi-publish@a892a5a61159132606e93a2fa6f4358831b04d26 # v1.14.2
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
 
       - name: Create GitHub release
         if: steps.existing_release.outputs.published != 'true'
