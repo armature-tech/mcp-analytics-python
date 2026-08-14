@@ -130,9 +130,15 @@ jobs:
           ARMATURE_REQUIRE_FASTMCP: "1"
         run: python scripts/run_publish_canary.py --artifact "$(ls dist/*.whl)" --fastmcp-major 2
 
+      # v1.14.2 pins twine 7.0.0. The previous pin shipped an older twine that
+      # rejected the wheel with "Invalid distribution metadata: '2.5' is not a
+      # valid metadata version": `python -m build --upgrade` pulls current
+      # hatchling, which emits Metadata-Version 2.5, and the old twine only
+      # knew 2.4. Keep this pin ahead of whatever metadata version the build
+      # backend emits, or pin hatchling in pyproject.toml instead.
       - name: Publish
         if: steps.existing_release.outputs.published != 'true'
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        uses: pypa/gh-action-pypi-publish@a892a5a61159132606e93a2fa6f4358831b04d26 # v1.14.2
 
       - name: Create GitHub release
         if: steps.existing_release.outputs.published != 'true'
