@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Fixed
+
+- Built-in secret redaction now catches AWS secret access keys written after
+  their name (`AWS_SECRET_ACCESS_KEY=…`, `aws_secret_access_key = …`,
+  `SecretAccessKey: …`) and replaces them with
+  `[redacted:aws-secret-access-key]`, per the updated shared contract. Only
+  the access key ID was caught before.
+
 ### Client attribution for stateful (handshake-era) servers
 
 Stateful servers process the `initialize` handshake inside their transport,

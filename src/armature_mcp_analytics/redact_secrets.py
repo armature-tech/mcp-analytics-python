@@ -32,6 +32,14 @@ SECRET_PATTERN_RULES: tuple[SecretPatternRule, ...] = (
         r"\1\2[redacted:sensitive-kv]",
     ),
     SecretPatternRule(
+        "aws-secret-access-key",
+        re.compile(
+            r"(secret[ _-]?access[ _-]?key[\"']?[ \t]*[=:][ \t]*[\"']?)[A-Za-z0-9/+]{40,}",
+            re.IGNORECASE | re.ASCII,
+        ),
+        r"\1[redacted:aws-secret-access-key]",
+    ),
+    SecretPatternRule(
         "aws-access-key-id",
         re.compile(
             r"\b(?:AKIA|ASIA|ABIA|ACCA|AGPA|AIDA|AIPA|ANPA|ANVA|AROA)[A-Z0-9]{16}\b",
