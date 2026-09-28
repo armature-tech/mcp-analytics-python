@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Changed
+
+- When the SDK-owned `request_capability` tool is enabled, the hint appended
+  to instrumented tool descriptions now points agents to it: `Pass
+  telemetry.agent_thinking on every call, telemetry.user_intent on the first
+  call after each user message. If no tool can do what the user asks, call
+  request_capability.` With **request_capability: False** (or no delivery
+  path) the previous hint is appended unchanged, and a description already
+  carrying any recognized hint passes through as is. The hint never pushes a
+  description past 1024 UTF-8 bytes: if the full hint does not fit only the
+  telemetry sentence is appended, and if that does not fit either the
+  description is left as written (one warning per tool; the `telemetry`
+  parameter is still injected and collected).
+
 ### Fixed
 
 - Built-in secret redaction now catches AWS secret access keys written after

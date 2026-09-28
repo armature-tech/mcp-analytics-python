@@ -8,8 +8,12 @@ import unittest
 from pathlib import Path
 
 from armature_mcp_analytics import instrument_fastmcp
+from armature_mcp_analytics.capability import REQUEST_CAPABILITY_DESCRIPTION
 from armature_mcp_analytics.schema import (
     AGENT_THINKING_DESCRIPTION,
+    TELEMETRY_DESCRIPTION_HINT,
+    TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY,
+    TELEMETRY_HINT_TELEMETRY_SENTENCE,
     TELEMETRY_PROPERTY_DESCRIPTION,
     USER_FRUSTRATION_DESCRIPTION,
     USER_INTENT_DESCRIPTION,
@@ -332,6 +336,81 @@ class FastMCPAdapterTests(unittest.TestCase):
         ]
         self.assertEqual(intents, ["real FastMCP", "named form"])
 
+    def test_external_fastmcp_tools_list_advertises_request_capability_hint(self) -> None:
+        try:
+            from fastmcp import Client, FastMCP
+        except ImportError:
+            self.skip_missing_dependency("fastmcp")
+
+        def build(config: dict):
+            mcp = FastMCP("analytics-hint-test")
+            instrument_fastmcp(mcp, config)
+
+            @mcp.tool
+            def lookup_customer(customer_id: str) -> dict:
+                """Look up a customer."""
+                return {"customer_id": customer_id}
+
+            return mcp
+
+        async def advertised(mcp) -> dict:
+            async with Client(mcp) as client:
+                return {tool.name: tool for tool in await client.list_tools()}
+
+        # On by default once a delivery path exists.
+        enabled = asyncio.run(advertised(build({"armature": {"emit": lambda _batch: None}})))
+        self.assertEqual(set(enabled), {"lookup_customer", "request_capability"})
+        self.assertEqual(
+            enabled["lookup_customer"].description,
+            "Look up a customer." + TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY,
+        )
+        self.assertEqual(enabled["request_capability"].description, REQUEST_CAPABILITY_DESCRIPTION)
+        self.assertNotIn("telemetry", enabled["request_capability"].inputSchema["properties"])
+
+        disabled = asyncio.run(
+            advertised(
+                build({"armature": {"emit": lambda _batch: None, "request_capability": False}})
+            )
+        )
+        self.assertEqual(set(disabled), {"lookup_customer"})
+        self.assertEqual(
+            disabled["lookup_customer"].description,
+            "Look up a customer." + TELEMETRY_DESCRIPTION_HINT,
+        )
+
+    def test_external_fastmcp_applies_the_description_length_guard(self) -> None:
+        try:
+            from fastmcp import Client, FastMCP
+        except ImportError:
+            self.skip_missing_dependency("fastmcp")
+
+        telemetry_only = "\n\n" + TELEMETRY_HINT_TELEMETRY_SENTENCE
+        partial = "p" * (
+            1024 - len(TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY.encode("utf-8")) + 1
+        )
+        unchanged = "u" * (1024 - len(telemetry_only.encode("utf-8")) + 1)
+        mcp = FastMCP("analytics-long-description-test")
+        instrument_fastmcp(mcp, {"armature": {"emit": lambda _batch: None}})
+
+        @mcp.tool(name="partial_real_tool", description=partial)
+        def partial_real_tool(customer_id: str) -> dict:
+            return {"customer_id": customer_id}
+
+        @mcp.tool(name="unchanged_real_tool", description=unchanged)
+        def unchanged_real_tool(customer_id: str) -> dict:
+            return {"customer_id": customer_id}
+
+        async def advertised() -> dict:
+            async with Client(mcp) as client:
+                return {tool.name: tool for tool in await client.list_tools()}
+
+        tools = asyncio.run(advertised())
+        self.assertEqual(tools["partial_real_tool"].description, partial + telemetry_only)
+        self.assertEqual(tools["unchanged_real_tool"].description, unchanged)
+        for name in ("partial_real_tool", "unchanged_real_tool"):
+            self.assertLessEqual(len(tools[name].description.encode("utf-8")), 1024)
+            self.assertIn("telemetry", tools[name].inputSchema["properties"])
+
     def test_official_sdk_fastmcp_advertises_telemetry_schema(self) -> None:
         try:
             from mcp.server.fastmcp import FastMCP
@@ -360,6 +439,12 @@ class FastMCPAdapterTests(unittest.TestCase):
             tools = await mcp.list_tools()
             lookup = next(tool for tool in tools if tool.name == "lookup_customer")
             self.assert_advertised_telemetry_schema(lookup.inputSchema, lookup.description)
+            # request_capability is on by default with an emit sink, so the
+            # hint points agents to it.
+            self.assertEqual(
+                lookup.description,
+                "Look up a customer." + TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY,
+            )
 
             await mcp.call_tool(
                 "lookup_customer",

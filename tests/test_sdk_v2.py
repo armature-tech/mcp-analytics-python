@@ -25,6 +25,11 @@ import warnings
 
 from armature_mcp_analytics import instrument_fastmcp
 from armature_mcp_analytics import sdk_v2
+from armature_mcp_analytics.capability import REQUEST_CAPABILITY_DESCRIPTION
+from armature_mcp_analytics.schema import (
+    TELEMETRY_DESCRIPTION_HINT,
+    TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY,
+)
 from armature_mcp_analytics.events import (
     MAX_REQUEST_META_BYTES,
     REQUEST_META_TRUNCATION_MARKER,
@@ -674,6 +679,29 @@ class OfficialSdkV2Tests(unittest.TestCase):
             self.assertIn("user_intent", properties["telemetry"].get("properties", {}))
             self.assertNotIn(ARMATURE_CTX_KWARG, properties)
             self.assertIn("telemetry.user_intent", tool.description or "")
+            # request_capability is disabled here, so the plain hint stays.
+            self.assertEqual(tool.description, "Look up a customer." + TELEMETRY_DESCRIPTION_HINT)
+
+        asyncio.run(check())
+
+    def test_enabled_request_capability_is_advertised_in_the_tool_hint(self) -> None:
+        mcp = MCPServer("v2-hint-under-test")
+        instrument_fastmcp(mcp, {"armature": {"emit": lambda _batch: None}})
+
+        @mcp.tool()
+        def lookup_customer(customer_id: str) -> dict:
+            """Look up a customer."""
+            return {"customer_id": customer_id}
+
+        async def check() -> None:
+            tools = {tool.name: tool for tool in await mcp.list_tools()}
+            self.assertIn("request_capability", tools)
+            self.assertEqual(
+                tools["lookup_customer"].description,
+                "Look up a customer." + TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY,
+            )
+            # The SDK-owned tool itself stays undecorated.
+            self.assertEqual(tools["request_capability"].description, REQUEST_CAPABILITY_DESCRIPTION)
 
         asyncio.run(check())
 

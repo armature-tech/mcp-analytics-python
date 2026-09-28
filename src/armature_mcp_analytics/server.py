@@ -697,8 +697,12 @@ def instrument_fastmcp(server: Any, config: AnalyticsConfig | None = None) -> Fa
         # attribution, so say so loudly up front (never crash).
         warn_mcp2_unknown_server(server)
     supports_schema_kwargs = _supports_schema_kwargs(original_tool)
+    # Injected-mode descriptions point agents at request_capability whenever
+    # the config enables it (same predicate as the recorder and the other
+    # SDKs); a customer tool that keeps the name still answers to it.
+    advertise_request_capability = request_capability_enabled(config)
 
-    should_inject_request_capability = request_capability_enabled(config)
+    should_inject_request_capability = advertise_request_capability
     if should_inject_request_capability and _server_has_tool_named(
         server, REQUEST_CAPABILITY_TOOL_NAME
     ):
@@ -794,7 +798,11 @@ def instrument_fastmcp(server: Any, config: AnalyticsConfig | None = None) -> Fa
             if telemetry_mode == "injected":
                 schema = decorate_input_schema_with_telemetry(kwargs_schema, config)
                 kwargs = _set_schema_kwargs(decorator_kwargs, schema, supports_schema_kwargs=supports_schema_kwargs)
-                kwargs["description"] = append_telemetry_hint(_description_from(func, decorator_kwargs))
+                kwargs["description"] = append_telemetry_hint(
+                    _description_from(func, decorator_kwargs),
+                    request_capability=advertise_request_capability,
+                    tool_name=str(name),
+                )
             wrapped = _wrap_handler(recorder, str(name), func, telemetry_mode)
             wrapped_signature: inspect.Signature | None = None
             scrub_signature_attached = False

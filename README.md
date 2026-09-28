@@ -374,10 +374,15 @@ delivery is configured. When you explicitly set **request_capability: True**, a
 customer tool of the same name is rejected as reserved; when it is on merely by
 default, the customer tool takes precedence and the SDK skips its own injection.
 The camelCase alias **requestCapability** is also accepted.
+While it is enabled, the telemetry hint appended to each instrumented tool's
+description ends with "If no tool can do what the user asks, call
+request_capability." so agents know the tool exists.
 
 ### Telemetry capture and privacy
 
 The SDK injects an optional `telemetry` parameter (`user_intent`, `agent_thinking`, `user_frustration`) into each wrapped tool. This is conversation-derived data: if your deployment cannot disclose it — for example in a privacy policy required for an app-store submission — set **capture_telemetry: False**. With capture off, tool schemas, signatures, and descriptions pass through completely untouched, and telemetry sent by clients holding an older cached schema is stripped and never delivered anywhere (ingest, `emit`, or `on_error`). Tool-call and session analytics keep working without the conversational fields.
+
+With capture on, each instrumented tool's description also gets a short hint asking agents to fill these fields. The SDK never lets it push a description past 1024 UTF-8 bytes: it appends only the telemetry sentence when the full hint does not fit, or leaves the description unchanged when that does not fit either (one warning per tool; the `telemetry` parameter is still injected).
 
 Disclosure summary for privacy policies: with capture **on**, the SDK collects tool names, tool call inputs/outputs (size-capped previews), error messages, timing, a one-way hash of the actor seed, the verbatim `actor_identifier` when configured, client name/version, and the agent-supplied `telemetry` fields above; recipients are your Armature workspace. With capture **off**, the `telemetry` fields are not collected.
 

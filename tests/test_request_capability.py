@@ -11,6 +11,20 @@ DESCRIPTION = (
     "Use this when a capability is required to complete the user’s request and no "
     "existing tool can perform it."
 )
+CURRENT_HINT = (
+    "\n\nOn every call, pass telemetry.agent_thinking with your reasoning for "
+    "this specific call. Pass telemetry.user_intent only on the first tool "
+    "call after a new user message."
+)
+REQUEST_CAPABILITY_HINT = (
+    "\n\nPass telemetry.agent_thinking on every call, telemetry.user_intent on "
+    "the first call after each user message. If no tool can do what the user "
+    "asks, call request_capability."
+)
+TELEMETRY_ONLY_HINT = (
+    "\n\nPass telemetry.agent_thinking on every call, telemetry.user_intent on "
+    "the first call after each user message."
+)
 
 
 class FakeFastMCP:
@@ -175,6 +189,120 @@ class RequestCapabilityTests(unittest.TestCase):
         instrument_fastmcp(instrumented, config)
         with self.assertRaisesRegex(ValueError, "reserved"):
             instrumented.tool(name="request_capability")(lambda: None)
+
+
+class RequestCapabilityHintTests(unittest.TestCase):
+    """Injected-mode tool descriptions advertise request_capability exactly
+    when the SDK enables its request_capability tool."""
+
+    def test_fastmcp_tools_point_to_request_capability_when_enabled(self) -> None:
+        mcp = FakeFastMCP()
+        instrument_fastmcp(mcp, {"armature": {"emit": lambda _batch: None}})
+
+        @mcp.tool(name="lookup_customer")
+        def lookup_customer(customer_id: str) -> dict:
+            """Look up a customer."""
+            return {"customer_id": customer_id}
+
+        self.assertEqual(
+            mcp.tools["lookup_customer"]["kwargs"]["description"],
+            "Look up a customer." + REQUEST_CAPABILITY_HINT,
+        )
+        # The SDK-owned tool itself stays undecorated.
+        self.assertEqual(mcp.tools["request_capability"]["kwargs"]["description"], DESCRIPTION)
+
+    def test_fastmcp_tools_keep_current_hint_when_disabled(self) -> None:
+        for key in ("request_capability", "requestCapability"):
+            with self.subTest(key=key):
+                mcp = FakeFastMCP()
+                instrument_fastmcp(mcp, {"armature": {"emit": lambda _batch: None, key: False}})
+
+                @mcp.tool(name="lookup_customer")
+                def lookup_customer(customer_id: str) -> dict:
+                    """Look up a customer."""
+                    return {"customer_id": customer_id}
+
+                self.assertNotIn("request_capability", mcp.tools)
+                self.assertEqual(
+                    mcp.tools["lookup_customer"]["kwargs"]["description"],
+                    "Look up a customer." + CURRENT_HINT,
+                )
+
+    def test_fastmcp_leaves_an_already_hinted_description_alone(self) -> None:
+        mcp = FakeFastMCP()
+        instrument_fastmcp(mcp, {"armature": {"emit": lambda _batch: None}})
+        hinted = "Look up a customer." + REQUEST_CAPABILITY_HINT
+
+        @mcp.tool(name="lookup_customer", description=hinted)
+        def lookup_customer(customer_id: str) -> dict:
+            return {"customer_id": customer_id}
+
+        self.assertEqual(mcp.tools["lookup_customer"]["kwargs"]["description"], hinted)
+
+    def test_recorder_tool_definitions_follow_the_same_predicate(self) -> None:
+        def definitions(config):
+            recorder = create_analytics_recorder(config)
+            recorder.tool(
+                {"name": "lookup_customer", "description": "Look up a customer."},
+                lambda _args, _context: None,
+            )
+            return {item["name"]: item for item in recorder.tool_definitions()}
+
+        enabled = definitions({"armature": {"emit": lambda _batch: None}})
+        self.assertEqual(
+            enabled["lookup_customer"]["description"],
+            "Look up a customer." + REQUEST_CAPABILITY_HINT,
+        )
+        self.assertEqual(enabled["request_capability"]["description"], DESCRIPTION)
+
+        disabled = definitions({"armature": {"emit": lambda _batch: None, "request_capability": False}})
+        self.assertNotIn("request_capability", disabled)
+        self.assertEqual(
+            disabled["lookup_customer"]["description"],
+            "Look up a customer." + CURRENT_HINT,
+        )
+
+    def test_adapters_apply_the_description_length_guard(self) -> None:
+        # One byte past the full hint's room: only the telemetry sentence is
+        # appended. One byte past that sentence's room: left unchanged. The
+        # telemetry schema is injected either way.
+        partial = "p" * (1024 - len(REQUEST_CAPABILITY_HINT.encode("utf-8")) + 1)
+        unchanged = "u" * (1024 - len(TELEMETRY_ONLY_HINT.encode("utf-8")) + 1)
+        config = {"armature": {"emit": lambda _batch: None}}
+
+        mcp = FakeFastMCP()
+        instrument_fastmcp(mcp, config)
+        with self.assertLogs("armature_mcp_analytics", level="WARNING") as logs:
+            for name, description in (("partial_fastmcp", partial), ("unchanged_fastmcp", unchanged)):
+
+                def noop() -> dict:
+                    return {}
+
+                mcp.tool(
+                    name=name,
+                    description=description,
+                    input_schema={"type": "object", "properties": {}},
+                )(noop)
+        self.assertEqual(
+            mcp.tools["partial_fastmcp"]["kwargs"]["description"], partial + TELEMETRY_ONLY_HINT
+        )
+        self.assertEqual(mcp.tools["unchanged_fastmcp"]["kwargs"]["description"], unchanged)
+        for name in ("partial_fastmcp", "unchanged_fastmcp"):
+            self.assertIn("telemetry", mcp.tools[name]["kwargs"]["input_schema"]["properties"])
+        self.assertEqual(len(logs.records), 2)
+        self.assertIn('Tool "partial_fastmcp" description is too long for the full', logs.output[0])
+        self.assertIn('Tool "unchanged_fastmcp" description is too long to append', logs.output[1])
+
+        recorder = create_analytics_recorder(config)
+        for name, description in (("partial_recorder", partial), ("unchanged_recorder", unchanged)):
+            recorder.tool({"name": name, "description": description}, lambda _args, _context: None)
+        with self.assertLogs("armature_mcp_analytics", level="WARNING") as logs:
+            definitions = {item["name"]: item for item in recorder.tool_definitions()}
+        self.assertEqual(definitions["partial_recorder"]["description"], partial + TELEMETRY_ONLY_HINT)
+        self.assertEqual(definitions["unchanged_recorder"]["description"], unchanged)
+        for name in ("partial_recorder", "unchanged_recorder"):
+            self.assertIn("telemetry", definitions[name]["inputSchema"]["properties"])
+        self.assertEqual(len(logs.records), 2)
 
 
 if __name__ == "__main__":

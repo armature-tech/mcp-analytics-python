@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+from .capability import request_capability_enabled
 from .types import AnalyticsConfig, JsonDict, TelemetryArgs, TelemetryFieldMap, TelemetryMode
 
 _logger = logging.getLogger("armature_mcp_analytics")
@@ -24,6 +25,26 @@ TELEMETRY_DESCRIPTION_HINT = (
     "\n\nOn every call, pass telemetry.agent_thinking with your reasoning for this specific call. Pass telemetry.user_intent only on the first tool call after a new user message."
 )
 TELEMETRY_DESCRIPTION_HINT_MARKER = TELEMETRY_DESCRIPTION_HINT.strip()
+# Emitted instead of TELEMETRY_DESCRIPTION_HINT when the SDK-owned
+# request_capability tool is enabled (request_capability_enabled), so agents
+# learn the tool exists. Built from two whole sentences so the length guard in
+# append_telemetry_hint can drop the second without cutting inside a sentence.
+TELEMETRY_HINT_TELEMETRY_SENTENCE = (
+    "Pass telemetry.agent_thinking on every call, telemetry.user_intent on the "
+    "first call after each user message."
+)
+TELEMETRY_HINT_REQUEST_CAPABILITY_SENTENCE = (
+    "If no tool can do what the user asks, call request_capability."
+)
+TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY = (
+    f"\n\n{TELEMETRY_HINT_TELEMETRY_SENTENCE} {TELEMETRY_HINT_REQUEST_CAPABILITY_SENTENCE}"
+)
+TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY_MARKER = (
+    TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY.strip()
+)
+# Appended alone when the full hint would not fit, or when the description
+# already carries the request_capability sentence.
+TELEMETRY_DESCRIPTION_HINT_TELEMETRY_ONLY = f"\n\n{TELEMETRY_HINT_TELEMETRY_SENTENCE}"
 # Older hints are recognized (never emitted) so descriptions written by an
 # earlier wrapper don't accumulate mixed-generation nudges.
 TELEMETRY_DESCRIPTION_HINT_REPEAT_INTENT_MARKER = (
@@ -60,17 +81,97 @@ USER_FRUSTRATION_DESCRIPTION = (
 _FRUSTRATION_LEVELS = ("low", "medium", "high")
 
 
-def append_telemetry_hint(description: str | None) -> str:
+_RECOGNIZED_HINT_MARKERS = (
+    TELEMETRY_DESCRIPTION_HINT_MARKER,
+    TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY_MARKER,
+    TELEMETRY_HINT_TELEMETRY_SENTENCE,
+    TELEMETRY_DESCRIPTION_HINT_REPEAT_INTENT_MARKER,
+    TELEMETRY_DESCRIPTION_HINT_V1_MARKER,
+    TELEMETRY_DESCRIPTION_HINT_LEGACY_MARKER,
+)
+
+
+# Some clients reject a whole tools/list or request when any tool description
+# exceeds this. Measured in UTF-8 bytes: conservative, and identical across the
+# TS, Go, PHP and Python SDKs.
+MAX_TOOL_DESCRIPTION_LENGTH = 1024
+
+
+def _utf8_length(value: str) -> int:
+    return len(value.encode("utf-8"))
+
+
+def append_telemetry_hint(
+    description: str | None,
+    *,
+    request_capability: bool = False,
+    tool_name: str | None = None,
+) -> str:
+    """Append the per-tool telemetry hint.
+
+    ``request_capability=True`` (the SDK-owned request_capability tool is
+    enabled) selects the hint that also points agents to that tool. A
+    description already carrying any recognized hint passes through unchanged.
+    The result never exceeds MAX_TOOL_DESCRIPTION_LENGTH UTF-8 bytes: when the
+    full hint does not fit, only the telemetry sentence is appended, and when
+    that does not fit either the description is left unchanged (warned once per
+    ``tool_name`` when given). Nothing is ever cut inside a sentence, and the
+    telemetry schema is injected either way.
+    """
+    hint = (
+        TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY
+        if request_capability
+        else TELEMETRY_DESCRIPTION_HINT
+    )
     if description is None:
-        return TELEMETRY_DESCRIPTION_HINT.lstrip()
-    if (
-        TELEMETRY_DESCRIPTION_HINT_MARKER in description
-        or TELEMETRY_DESCRIPTION_HINT_REPEAT_INTENT_MARKER in description
-        or TELEMETRY_DESCRIPTION_HINT_V1_MARKER in description
-        or TELEMETRY_DESCRIPTION_HINT_LEGACY_MARKER in description
-    ):
+        return hint.lstrip()
+    if any(marker in description for marker in _RECOGNIZED_HINT_MARKERS):
         return description
-    return f"{description}{TELEMETRY_DESCRIPTION_HINT}"
+    if request_capability and TELEMETRY_HINT_REQUEST_CAPABILITY_SENTENCE in description:
+        # The customer already points agents at request_capability.
+        hint = TELEMETRY_DESCRIPTION_HINT_TELEMETRY_ONLY
+    hinted = f"{description}{hint}"
+    if _utf8_length(hinted) <= MAX_TOOL_DESCRIPTION_LENGTH:
+        return hinted
+    partial = f"{description}{TELEMETRY_DESCRIPTION_HINT_TELEMETRY_ONLY}"
+    if _utf8_length(partial) <= MAX_TOOL_DESCRIPTION_LENGTH:
+        if tool_name is not None:
+            _warn_once_per_tool(
+                _warned_long_descriptions,
+                tool_name,
+                '[mcp-analytics] Tool "%s" description is too long for the full '
+                "Armature telemetry hint within 1024 characters; appended only the "
+                "telemetry sentence.",
+            )
+        return partial
+    if tool_name is not None:
+        _warn_once_per_tool(
+            _warned_long_descriptions,
+            tool_name,
+            '[mcp-analytics] Tool "%s" description is too long to append the Armature '
+            "telemetry hint without exceeding 1024 characters; leaving it unchanged. "
+            "Telemetry is still collected.",
+        )
+    return description
+
+
+def telemetry_hint_appender(
+    config: AnalyticsConfig | None = None,
+    tool_name: str | None = None,
+) -> Callable[[str | None], str]:
+    """append_telemetry_hint bound to ``config`` and ``tool_name``: the
+    request_capability hint exactly when request_capability_enabled(config),
+    the predicate that also decides whether the SDK injects that tool."""
+    advertise_request_capability = request_capability_enabled(config)
+
+    def apply(description: str | None) -> str:
+        return append_telemetry_hint(
+            description,
+            request_capability=advertise_request_capability,
+            tool_name=tool_name,
+        )
+
+    return apply
 
 
 def _armature_value(config: AnalyticsConfig | None, snake: str, camel: str, default: Any = None) -> Any:
@@ -110,17 +211,24 @@ def schema_declares_telemetry(input_schema: Any) -> bool:
 # factory paths, and repeating the warning on every cold start's every tool
 # would drown real logs.
 _warned_collisions: set[str] = set()
+# Shared by both description-length warnings: at most one per tool name.
+_warned_long_descriptions: set[str] = set()
+
+
+def _warn_once_per_tool(seen: set[str], tool_name: str, message: str) -> None:
+    if tool_name in seen:
+        return
+    seen.add(tool_name)
+    _logger.warning(message, tool_name)
 
 
 def warn_telemetry_collision(tool_name: str) -> None:
-    if tool_name in _warned_collisions:
-        return
-    _warned_collisions.add(tool_name)
-    _logger.warning(
+    _warn_once_per_tool(
+        _warned_collisions,
+        tool_name,
         '[mcp-analytics] Tool "%s" already declares a top-level "telemetry" input field; '
         "leaving the tool untouched and not collecting Armature telemetry for it. "
         "Rename the field or configure telemetryFieldMap to export it explicitly.",
-        tool_name,
     )
 
 
@@ -130,7 +238,7 @@ class ToolTelemetryPlan:
     # Decorated schema for "injected"; the caller's original schema (possibly
     # None) for "owned" and "scrub".
     input_schema: Any
-    # append_telemetry_hint for "injected"; identity otherwise, so tools we do
+    # telemetry_hint_appender(config, tool_name) for "injected"; identity otherwise, so tools we do
     # not collect telemetry for never advertise a telemetry contract.
     apply_description: Callable[[str | None], str | None]
 
@@ -156,7 +264,7 @@ def plan_tool_telemetry(
     return ToolTelemetryPlan(
         mode="injected",
         input_schema=decorate_input_schema_with_telemetry(input_schema, config),
-        apply_description=append_telemetry_hint,
+        apply_description=telemetry_hint_appender(config, tool_name),
     )
 
 
