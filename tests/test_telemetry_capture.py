@@ -86,6 +86,19 @@ class CaptureRecorderTest(unittest.TestCase):
         asyncio.run(recorder.record_tool_call(status="ok", **event))
         return batches[0]
 
+    def test_public_call_purpose_reaches_existing_event_keys_and_redaction(self) -> None:
+        batch = self._record(
+            {"redact": lambda value: json.loads(json.dumps(value).replace("private-note", "[redacted]"))},
+            name="search",
+            args={"q": "x"},
+            telemetry={"call_purpose": "Find private-note records", "agent_thinking": "old"},
+            result={"ok": True},
+        )
+        event = next(e for e in batch["events"] if e["kind"] == "tool_call")
+        self.assertEqual(event["metadata"]["agent_thinking"], "Find [redacted] records")
+        self.assertEqual(event["metadata"]["context"], "Find [redacted] records")
+        self.assertNotIn("call_purpose", event["metadata"])
+
     def test_capture_off_drops_telemetry_even_from_direct_callers(self) -> None:
         batch = self._record(
             {"capture_telemetry": False},
@@ -167,6 +180,27 @@ class SyncWrapperOwnershipTest(unittest.TestCase):
 
 
 class FieldMapTest(unittest.TestCase):
+    def test_call_purpose_map_precedes_legacy_map_without_stripping(self) -> None:
+        arguments = {"action": "Retrieve records", "old": "Legacy description"}
+        mapping = {"call_purpose": "action", "agent_thinking": "old"}
+        self.assertEqual(apply_telemetry_field_map(None, arguments, mapping), {"agent_thinking": "Retrieve records"})
+        explicit = {"call_purpose": ""}
+        self.assertEqual(apply_telemetry_field_map(explicit, arguments, mapping), explicit)
+        self.assertEqual(arguments["action"], "Retrieve records")
+
+    def test_new_field_precedence_and_cached_aliases(self) -> None:
+        for value, expected in (("Retrieve records", "Retrieve records"), ("", ""), (123, "old")):
+            with self.subTest(value=value):
+                args, telemetry = extract_telemetry_arguments({"q": "x", "telemetry": {
+                    "call_purpose": value, "agent_thinking": "old", "context": "older",
+                }})
+                self.assertEqual(args, {"q": "x"})
+                self.assertEqual(telemetry, {"agent_thinking": expected})
+        for mode in ("owned", "scrub"):
+            args, telemetry = extract_telemetry_arguments({"telemetry": {"call_purpose": "private"}}, mode)
+            self.assertIsNone(telemetry)
+            self.assertEqual("telemetry" in args, mode == "owned")
+
     def test_cached_user_turn_field_map_is_ignored(self) -> None:
         self.assertIsNone(
             apply_telemetry_field_map(None, {"turn": 2.0}, {"user_turn": "turn"})

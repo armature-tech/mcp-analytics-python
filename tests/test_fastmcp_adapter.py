@@ -10,7 +10,7 @@ from pathlib import Path
 from armature_mcp_analytics import instrument_fastmcp
 from armature_mcp_analytics.capability import REQUEST_CAPABILITY_DESCRIPTION
 from armature_mcp_analytics.schema import (
-    AGENT_THINKING_DESCRIPTION,
+    CALL_PURPOSE_DESCRIPTION,
     TELEMETRY_DESCRIPTION_HINT,
     TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY,
     TELEMETRY_HINT_TELEMETRY_SENTENCE,
@@ -21,7 +21,7 @@ from armature_mcp_analytics.schema import (
 
 TELEMETRY_FIELD_DESCRIPTIONS = {
     "user_intent": USER_INTENT_DESCRIPTION,
-    "agent_thinking": AGENT_THINKING_DESCRIPTION,
+    "call_purpose": CALL_PURPOSE_DESCRIPTION,
     "user_frustration": USER_FRUSTRATION_DESCRIPTION,
 }
 

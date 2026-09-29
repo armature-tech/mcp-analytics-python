@@ -92,7 +92,7 @@ mcp.run()
 
 | Understand demand | Find what breaks | Improve with context |
 | --- | --- | --- |
-| See which tools and use cases people actually need. | Surface failures, retries, latency, and dead ends. | Connect every call to user intent and agent reasoning. |
+| See which tools and use cases people actually need. | Surface failures, retries, latency, and dead ends. | Connect every call to user intent and the purpose of each action. |
 
 No custom event schema. No logging pipeline. No changes to your tool handlers.
 
@@ -110,7 +110,7 @@ No custom event schema. No logging pipeline. No changes to your tool handlers.
 Armature instruments the boundary around every tool call:
 
 1. The SDK adds an optional **telemetry** block to the tool’s input schema.
-2. The agent can attach user intent, reasoning, and frustration to the call.
+2. The agent can attach user intent, the action purpose, and frustration to the call.
 3. The SDK removes telemetry before your handler receives the arguments.
 4. Timing, outcome, and truncated previews are sent to your dashboard.
 
@@ -118,13 +118,13 @@ Armature instruments the boundary around every tool call:
 {
   "telemetry": {
     "user_intent": "Check whether the customer's last payment succeeded",
-    "agent_thinking": "The payment lookup tool provides the requested status",
+    "call_purpose": "The payment lookup tool provides the requested status",
     "user_frustration": "low"
   }
 }
 ~~~
 
-All telemetry fields are optional. Send **agent_thinking** on every call; send **user_intent** and **user_frustration** only on the first call after each new user message. Their absence on later calls means the same turn continues. The earlier aliases remain accepted, while cached **user_turn** values are ignored.
+All telemetry fields are optional. Send **call_purpose** on every call; send **user_intent** and **user_frustration** only on the first call after each new user message. Their absence on later calls means the same turn continues. The earlier aliases remain accepted, while cached **user_turn** values are ignored.
 
 > **Privacy:** Armature is observability, not authentication. Keep your existing MCP authentication and authorization in place. Do not put secrets in tool arguments or telemetry fields.
 
@@ -380,13 +380,19 @@ request_capability." so agents know the tool exists.
 
 ### Telemetry capture and privacy
 
-The SDK injects an optional `telemetry` parameter (`user_intent`, `agent_thinking`, `user_frustration`) into each wrapped tool. This is conversation-derived data: if your deployment cannot disclose it — for example in a privacy policy required for an app-store submission — set **capture_telemetry: False**. With capture off, tool schemas, signatures, and descriptions pass through completely untouched, and telemetry sent by clients holding an older cached schema is stripped and never delivered anywhere (ingest, `emit`, or `on_error`). Tool-call and session analytics keep working without the conversational fields.
+The SDK injects an optional `telemetry` parameter (`user_intent`, `call_purpose`, `user_frustration`) into each wrapped tool. This is conversation-derived data: if your deployment cannot disclose it — for example in a privacy policy required for an app-store submission — set **capture_telemetry: False**. With capture off, tool schemas, signatures, and descriptions pass through completely untouched, and telemetry sent by clients holding an older cached schema is stripped and never delivered anywhere (ingest, `emit`, or `on_error`). Tool-call and session analytics keep working without the conversational fields.
 
-With capture on, each instrumented tool's description also gets a short hint asking agents to fill these fields. The SDK never lets it push a description past 1024 UTF-8 bytes: it appends only the telemetry sentence when the full hint does not fit, or leaves the description unchanged when that does not fit either (one warning per tool; the `telemetry` parameter is still injected).
+With capture on, each instrumented tool's description also gets a short hint asking agents to fill these fields. The SDK never lets it push a description past 1024 UTF-8 bytes: it omits the request_capability sentence when the full hint does not fit, or leaves the description unchanged when that does not fit either (one warning per tool; the `telemetry` parameter is still injected).
 
 Disclosure summary for privacy policies: with capture **on**, the SDK collects tool names, tool call inputs/outputs (size-capped previews), error messages, timing, a one-way hash of the actor seed, the verbatim `actor_identifier` when configured, client name/version, and the agent-supplied `telemetry` fields above; recipients are your Armature workspace. With capture **off**, the `telemetry` fields are not collected.
 
 If a tool function already declares its own `telemetry` parameter (or an explicit schema declares the property), the SDK treats that field as **yours**: signature, schema, and arguments pass through untouched, nothing is interpreted as Armature telemetry, and a warning is logged once at registration. To export an existing, semantically equivalent field, opt in explicitly with **telemetry_field_map** — e.g. `{"user_intent": "purpose"}` reads (never strips) the tool's `purpose` argument into `user_intent`. Explicit `telemetry` values always win over mapped ones, and the map is ignored while capture is off.
+
+### Compatibility with earlier telemetry fields
+
+Tools advertise `call_purpose` as a short public description of the action. It uses only the visible request and the tool function. Both `user_intent` and `call_purpose` use generic terms for names, document titles, teams, filters and other tool argument values. The SDK continues to accept `agent_thinking` and `context` from cached clients. `call_purpose` takes precedence, including an explicit empty string. Events keep the existing `agent_thinking` and `context` metadata keys so stored analytics remain compatible.
+
+The telemetry field map accepts `call_purpose` and the previous `agent_thinking` key. Explicit telemetry takes precedence over mapped arguments. Refresh the MCP connection after upgrading so the client loads the new tool schemas.
 
 ### Redaction and binary payloads
 

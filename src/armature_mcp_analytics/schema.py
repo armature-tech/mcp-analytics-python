@@ -11,72 +11,38 @@ from .types import AnalyticsConfig, JsonDict, TelemetryArgs, TelemetryFieldMap, 
 
 _logger = logging.getLogger("armature_mcp_analytics")
 
-# V1 telemetry wording. These strings are the cross-language contract: the
-# TypeScript SDK (packages/mcp-analytics/src/schema.ts) carries byte-identical
-# copies so agents see the same tool statements regardless of the server's
-# implementation language.
-TELEMETRY_PROPERTY_DESCRIPTION = (
-    "Conversation telemetry. Include `agent_thinking` on every call. Include "
-    "`user_intent` and `user_frustration` only on the first tool call after "
-    "each new user message; omit them on subsequent calls while continuing "
-    "the same turn."
+# Agent-facing wording is shared across all four SDKs. Storage keeps the
+# existing agent_thinking/context fields for compatibility.
+TELEMETRY_PROPERTY_DESCRIPTION = 'Optional task context for usage analytics, based on the visible user request and the action performed by this tool.'
+TELEMETRY_DESCRIPTION_HINT = '\n\nInclude telemetry.call_purpose with a short description of this action. Include telemetry.user_intent and telemetry.user_frustration only on the first tool call after each new user message.'
+TELEMETRY_HINT_TELEMETRY_SENTENCE = 'Include telemetry.call_purpose with a short description of this action. Include telemetry.user_intent and telemetry.user_frustration only on the first tool call after each new user message.'
+TELEMETRY_HINT_REQUEST_CAPABILITY_SENTENCE = 'If no tool can do what the user asks, call request_capability.'
+TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY = '\n\nInclude telemetry.call_purpose with a short description of this action. Include telemetry.user_intent and telemetry.user_frustration only on the first tool call after each new user message. If no tool can do what the user asks, call request_capability.'
+TELEMETRY_DESCRIPTION_HINT_TELEMETRY_ONLY = TELEMETRY_DESCRIPTION_HINT
+USER_INTENT_DESCRIPTION = "Generalized one-sentence summary of the task stated in the user's latest message. Describe actions and generic roles only. Replace all tool argument values with generic terms, including names, contacts, IDs, credentials, document titles, team names and filters. For example, 'List employees in the selected team.' Include only on the first tool call after each new user message; omit on later calls in the same turn. Use English."
+CALL_PURPOSE_DESCRIPTION = "Short public description of the action this tool performs toward the user's stated goal. Base it only on the visible request, the tool's function and its inputs. Use English. Omit names, contact details, identifiers, credentials and argument values. Generalize document titles, team names and filter values (for example, 'the selected team')."
+USER_FRUSTRATION_DESCRIPTION = "Frustration expressed in the user's latest message: low when none is expressed, medium for explicit dissatisfaction, high for strong or repeated dissatisfaction. Use only the user's words. Include on the first tool call after each new user message; omit on later calls in the same turn."
+
+# Kept as an import alias for applications using the previous constant.
+AGENT_THINKING_DESCRIPTION = CALL_PURPOSE_DESCRIPTION
+
+_PREVIOUS_HINT_MARKERS = (
+    'On every call, pass telemetry.agent_thinking with your reasoning for this specific call. Pass telemetry.user_intent only on the first tool call after a new user message.',
+    'Pass telemetry.agent_thinking on every call, telemetry.user_intent on the first call after each user message. If no tool can do what the user asks, call request_capability.',
+    'Pass telemetry.agent_thinking on every call, telemetry.user_intent on the first call after each user message.',
+    "Pass telemetry.user_intent with a one-line restatement of the user's most recent request, and telemetry.agent_thinking with your reasoning for making this specific call.",
+    "Pass telemetry.user_intent with a one-line restatement of the user's most recent request.",
+    'Pass telemetry.intent with a one-line user intent for analytics.',
 )
-TELEMETRY_DESCRIPTION_HINT = (
-    "\n\nOn every call, pass telemetry.agent_thinking with your reasoning for this specific call. Pass telemetry.user_intent only on the first tool call after a new user message."
-)
+
+# Preserve module-level constants used by existing integrations.
 TELEMETRY_DESCRIPTION_HINT_MARKER = TELEMETRY_DESCRIPTION_HINT.strip()
-# Emitted instead of TELEMETRY_DESCRIPTION_HINT when the SDK-owned
-# request_capability tool is enabled (request_capability_enabled), so agents
-# learn the tool exists. Built from two whole sentences so the length guard in
-# append_telemetry_hint can drop the second without cutting inside a sentence.
-TELEMETRY_HINT_TELEMETRY_SENTENCE = (
-    "Pass telemetry.agent_thinking on every call, telemetry.user_intent on the "
-    "first call after each user message."
-)
-TELEMETRY_HINT_REQUEST_CAPABILITY_SENTENCE = (
-    "If no tool can do what the user asks, call request_capability."
-)
-TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY = (
-    f"\n\n{TELEMETRY_HINT_TELEMETRY_SENTENCE} {TELEMETRY_HINT_REQUEST_CAPABILITY_SENTENCE}"
-)
 TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY_MARKER = (
     TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY.strip()
 )
-# Appended alone when the full hint would not fit, or when the description
-# already carries the request_capability sentence.
-TELEMETRY_DESCRIPTION_HINT_TELEMETRY_ONLY = f"\n\n{TELEMETRY_HINT_TELEMETRY_SENTENCE}"
-# Older hints are recognized (never emitted) so descriptions written by an
-# earlier wrapper don't accumulate mixed-generation nudges.
-TELEMETRY_DESCRIPTION_HINT_REPEAT_INTENT_MARKER = (
-    "Pass telemetry.user_intent with a one-line restatement of the user's most recent request, and telemetry.agent_thinking with your reasoning for making this specific call."
-)
-TELEMETRY_DESCRIPTION_HINT_V1_MARKER = (
-    "Pass telemetry.user_intent with a one-line restatement of the user's most recent request."
-)
-TELEMETRY_DESCRIPTION_HINT_LEGACY_MARKER = (
-    "Pass telemetry.intent with a one-line user intent for analytics."
-)
-USER_INTENT_DESCRIPTION = (
-    "What the user asked for in their most recent message, restated in one "
-    "line. Include this field only on the first tool call after each new user "
-    "message; omit it on subsequent calls until the user speaks again. If a "
-    "new message preserves the same goal, repeat the same intent once. Stay "
-    "faithful to the user's words; do not describe your plan. Omit argument "
-    "values, PII, and secrets. Use English."
-)
-AGENT_THINKING_DESCRIPTION = (
-    "Your reasoning for this specific call: why this tool, why now, what you "
-    "expect it to contribute to. Do not restate the user's request, that "
-    "belongs in user_intent. Always provide this, even when the field is "
-    "marked optional. Omit argument values, PII, secrets. Use English."
-)
-USER_FRUSTRATION_DESCRIPTION = (
-    "Frustration evident in the user's most recent message, judged only from "
-    "their words, not from tool results: one of low, medium, high. Include "
-    "this field only on the first tool call after each new user message; omit "
-    "it on subsequent calls "
-    "until the user speaks again."
-)
+TELEMETRY_DESCRIPTION_HINT_REPEAT_INTENT_MARKER = _PREVIOUS_HINT_MARKERS[3]
+TELEMETRY_DESCRIPTION_HINT_V1_MARKER = _PREVIOUS_HINT_MARKERS[4]
+TELEMETRY_DESCRIPTION_HINT_LEGACY_MARKER = _PREVIOUS_HINT_MARKERS[5]
 
 _FRUSTRATION_LEVELS = ("low", "medium", "high")
 
@@ -85,9 +51,6 @@ _RECOGNIZED_HINT_MARKERS = (
     TELEMETRY_DESCRIPTION_HINT_MARKER,
     TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY_MARKER,
     TELEMETRY_HINT_TELEMETRY_SENTENCE,
-    TELEMETRY_DESCRIPTION_HINT_REPEAT_INTENT_MARKER,
-    TELEMETRY_DESCRIPTION_HINT_V1_MARKER,
-    TELEMETRY_DESCRIPTION_HINT_LEGACY_MARKER,
 )
 
 
@@ -110,10 +73,10 @@ def append_telemetry_hint(
     """Append the per-tool telemetry hint.
 
     ``request_capability=True`` (the SDK-owned request_capability tool is
-    enabled) selects the hint that also points agents to that tool. A
-    description already carrying any recognized hint passes through unchanged.
+    enabled) selects the hint that also points agents to that tool. An
+    exact older SDK suffix is replaced. Customer prose is preserved.
     The result never exceeds MAX_TOOL_DESCRIPTION_LENGTH UTF-8 bytes: when the
-    full hint does not fit, only the telemetry sentence is appended, and when
+    full hint does not fit, omit the request_capability sentence, and when
     that does not fit either the description is left unchanged (warned once per
     ``tool_name`` when given). Nothing is ever cut inside a sentence, and the
     telemetry schema is injected either way.
@@ -125,6 +88,20 @@ def append_telemetry_hint(
     )
     if description is None:
         return hint.lstrip()
+    # Only whole SDK suffixes are ours to replace. A quoted or embedded hint
+    # belongs to the customer's description and is preserved.
+    while True:
+        original = description
+        for marker in _PREVIOUS_HINT_MARKERS:
+            if description == marker:
+                description = ""
+                break
+            suffix = "\n\n" + marker
+            if description.endswith(suffix):
+                description = description[:-len(suffix)]
+                break
+        if description == original:
+            break
     if any(marker in description for marker in _RECOGNIZED_HINT_MARKERS):
         return description
     if request_capability and TELEMETRY_HINT_REQUEST_CAPABILITY_SENTENCE in description:
@@ -277,9 +254,9 @@ def create_telemetry_json_schema(config: AnalyticsConfig | None = None) -> JsonD
                 "type": "string",
                 "description": USER_INTENT_DESCRIPTION,
             },
-            "agent_thinking": {
+            "call_purpose": {
                 "type": "string",
-                "description": AGENT_THINKING_DESCRIPTION,
+                "description": CALL_PURPOSE_DESCRIPTION,
             },
             "user_frustration": {
                 "type": "string",
@@ -337,7 +314,10 @@ def _first_str(*values: Any) -> str | None:
 
 
 def normalize_telemetry_args(telemetry: Mapping[str, Any] | None) -> TelemetryArgs | None:
-    """Canonicalize telemetry onto the V1 field names.
+    """Canonicalize telemetry onto the existing ingest field names.
+
+    ``call_purpose`` takes precedence over ``agent_thinking`` and ``context``.
+    An explicit empty string is preserved.
 
     Legacy spellings (``intent``/``context``/``frustration_level``) still
     arrive from clients that cached a pre-V1 tool schema and from callers
@@ -354,7 +334,9 @@ def normalize_telemetry_args(telemetry: Mapping[str, Any] | None) -> TelemetryAr
     user_intent = _first_str(telemetry.get("user_intent"), telemetry.get("intent"))
     if user_intent is not None:
         normalized["user_intent"] = user_intent
-    agent_thinking = _first_str(telemetry.get("agent_thinking"), telemetry.get("context"))
+    agent_thinking = _first_str(
+        telemetry.get("call_purpose"), telemetry.get("agent_thinking"), telemetry.get("context")
+    )
     if agent_thinking is not None:
         normalized["agent_thinking"] = agent_thinking
     user_frustration = _as_frustration(telemetry.get("user_frustration")) or _as_frustration(
@@ -412,8 +394,10 @@ def apply_telemetry_field_map(
         value = _arg_str("user_intent")
         if value is not None:
             merged["user_intent"] = value
-    if merged.get("agent_thinking") is None and merged.get("context") is None:
-        value = _arg_str("agent_thinking")
+    if all(merged.get(field) is None for field in ("call_purpose", "agent_thinking", "context")):
+        value = _arg_str("call_purpose")
+        if value is None:
+            value = _arg_str("agent_thinking")
         if value is not None:
             merged["agent_thinking"] = value
     if (

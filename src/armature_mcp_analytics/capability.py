@@ -13,10 +13,7 @@ REQUEST_CAPABILITY_DESCRIPTION = (
     "existing tool can perform it."
 )
 REQUEST_CAPABILITY_ACKNOWLEDGMENT = "Capability request acknowledged."
-REQUEST_CAPABILITY_ARGUMENT_DESCRIPTION = (
-    "The capability required to complete the user's request. Omit argument "
-    "values, PII, and secrets. Use English."
-)
+REQUEST_CAPABILITY_ARGUMENT_DESCRIPTION = "One English sentence describing the missing capability needed for the user's task. Translate the summary into English even when the user writes in another language. Describe generic actions and roles. Omit names, contacts, IDs, credentials and all tool argument values."
 
 
 def request_capability_enabled(config: AnalyticsConfig | None) -> bool:

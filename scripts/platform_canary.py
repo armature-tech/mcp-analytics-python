@@ -35,7 +35,7 @@ async def main() -> None:
                 args={"marker": f"{label}/{call}"},
                 telemetry={
                     **({"user_intent": marker} if call == "call-1" else {}),
-                    "agent_thinking": f"exercise the {status} path",
+                    "call_purpose": f"exercise the {status} path",
                 },
                 session_id=f"{marker}/{label}",
                 status=status,

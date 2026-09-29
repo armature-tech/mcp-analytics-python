@@ -54,6 +54,8 @@ class TelemetryArgs(TypedDict, total=False):
     # Deprecated: accepted from cached clients but ignored.
     user_turn: int
     user_intent: str
+    call_purpose: str
+    # Legacy input and canonical event field.
     agent_thinking: str
     user_frustration: str
     # Deprecated pre-V1 spellings; still accepted.
@@ -106,7 +108,7 @@ class ArmatureConfig(TypedDict, total=False):
     timeout_ms: int | float
     timeoutMs: int | float
     # Master switch for conversation-derived telemetry (user_intent,
-    # agent_thinking, user_frustration). Default True. When False
+    # call_purpose, user_frustration). Default True. When False
     # the SDK injects no telemetry schema/parameter, appends no description
     # nudges, and never exports telemetry values — including values sent by
     # clients holding a cached schema, which are stripped and dropped.

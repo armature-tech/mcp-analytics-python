@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Advertise optional `call_purpose` using the visible task and tool action. Keep `user_intent` and `user_frustration` on the first call after each user message.
+- Accept legacy `agent_thinking` and `context` inputs. Keep existing event metadata names. Prefer `call_purpose`, including an explicit empty string.
+- Support `call_purpose` in telemetry field maps. Replace exact old SDK description suffixes while preserving customer prose and the UTF-8 byte limit.
+- Ask for capability summaries in English, with generic actions and roles, for user requests in every language.
+
 ### Changed
 
 - When the SDK-owned `request_capability` tool is enabled, the hint appended

@@ -18,16 +18,8 @@ from armature_mcp_analytics.schema import (
 )
 
 # Cross-language contract: byte-identical in the TS, Go and PHP SDKs.
-CURRENT_HINT = (
-    "\n\nOn every call, pass telemetry.agent_thinking with your reasoning for "
-    "this specific call. Pass telemetry.user_intent only on the first tool "
-    "call after a new user message."
-)
-REQUEST_CAPABILITY_HINT = (
-    "\n\nPass telemetry.agent_thinking on every call, telemetry.user_intent on "
-    "the first call after each user message. If no tool can do what the user "
-    "asks, call request_capability."
-)
+CURRENT_HINT = '\n\nInclude telemetry.call_purpose with a short description of this action. Include telemetry.user_intent and telemetry.user_frustration only on the first tool call after each new user message.'
+REQUEST_CAPABILITY_HINT = CURRENT_HINT + ' If no tool can do what the user asks, call request_capability.'
 EMPTY_SCHEMA = {"type": "object", "properties": {}}
 
 
@@ -48,8 +40,24 @@ class SchemaTests(unittest.TestCase):
         telemetry_props = decorated["properties"]["telemetry"]["properties"]
         self.assertNotIn("user_turn", telemetry_props)
         self.assertEqual(telemetry_props["user_intent"]["type"], "string")
-        self.assertEqual(telemetry_props["agent_thinking"]["type"], "string")
+        self.assertEqual(telemetry_props["call_purpose"]["type"], "string")
         self.assertEqual(telemetry_props["user_frustration"]["type"], "string")
+
+    def test_schema_advertises_only_public_optional_fields(self) -> None:
+        telemetry = decorate_input_schema_with_telemetry(None)["properties"]["telemetry"]
+        self.assertEqual(set(telemetry["properties"]), {"user_intent", "call_purpose", "user_frustration"})
+        self.assertNotIn("required", telemetry)
+        self.assertNotIn("enum", telemetry["properties"]["user_frustration"])
+        self.assertNotIn("reasoning", str(telemetry))
+
+    def test_old_suffix_migration_preserves_customer_prose_and_byte_limit(self) -> None:
+        old = "On every call, pass telemetry.agent_thinking with your reasoning for this specific call. Pass telemetry.user_intent only on the first tool call after a new user message."
+        description = "Find records." + "\n\n" + old
+        self.assertEqual(append_telemetry_hint(description), "Find records." + CURRENT_HINT)
+        quoted = 'Documentation quotes: "' + old + '". Keep this text.'
+        self.assertTrue(append_telemetry_hint(quoted).startswith(quoted))
+        long = "é" * 500
+        self.assertEqual(append_telemetry_hint(long + "\n\n" + old), long)
 
     def test_legacy_required_telemetry_mode_is_ignored(self) -> None:
         decorated = decorate_input_schema_with_telemetry(
@@ -120,7 +128,7 @@ class SchemaTests(unittest.TestCase):
         twice = append_telemetry_hint(once)
         self.assertEqual(once, twice)
 
-    def test_append_telemetry_hint_leaves_older_generation_hints_unchanged(self) -> None:
+    def test_append_telemetry_hint_migrates_older_generation_suffixes(self) -> None:
         # Earlier-V1 (user_intent only) and pre-V1 (`intent`) hints are
         # recognized so a description written by an older SDK build does not
         # accumulate a second, mixed-generation nudge.
@@ -128,29 +136,29 @@ class SchemaTests(unittest.TestCase):
             "Look up a customer.\n\nPass telemetry.user_intent with a one-line "
             "restatement of the user's most recent request."
         )
-        self.assertEqual(append_telemetry_hint(v1_hinted), v1_hinted)
+        self.assertEqual(append_telemetry_hint(v1_hinted), "Look up a customer." + CURRENT_HINT)
         repeated_intent_hinted = (
             "Look up a customer.\n\nPass telemetry.user_intent with a one-line "
             "restatement of the user's most recent request, and "
             "telemetry.agent_thinking with your reasoning for making this specific call."
         )
         self.assertEqual(
-            append_telemetry_hint(repeated_intent_hinted), repeated_intent_hinted
+            append_telemetry_hint(repeated_intent_hinted), "Look up a customer." + CURRENT_HINT
         )
         legacy_hinted = (
             "Look up a customer.\n\nPass telemetry.intent with a one-line user "
             "intent for analytics."
         )
-        self.assertEqual(append_telemetry_hint(legacy_hinted), legacy_hinted)
+        self.assertEqual(append_telemetry_hint(legacy_hinted), "Look up a customer." + CURRENT_HINT)
 
-    def test_append_telemetry_hint_leaves_pre_v1_hint_alone(self) -> None:
+    def test_append_telemetry_hint_migrates_pre_v1_suffix(self) -> None:
         # A description that reached us through a pre-V1 wrapper keeps its old
         # hint without gaining a second, mixed-generation one.
         legacy = (
             "Look up a customer.\n\n"
             "Pass telemetry.intent with a one-line user intent for analytics."
         )
-        self.assertEqual(append_telemetry_hint(legacy), legacy)
+        self.assertEqual(append_telemetry_hint(legacy), "Look up a customer." + CURRENT_HINT)
 
 
 class RequestCapabilityHintTests(unittest.TestCase):
@@ -207,26 +215,13 @@ class RequestCapabilityHintTests(unittest.TestCase):
                     plan.apply_description("Find things."), "Find things." + CURRENT_HINT
                 )
 
-    def test_any_recognized_hint_passes_through_unchanged(self) -> None:
-        hinted = [
-            "Find things." + REQUEST_CAPABILITY_HINT,
-            "Find things." + CURRENT_HINT,
-            (
-                "Find things.\n\nPass telemetry.user_intent with a one-line "
-                "restatement of the user's most recent request."
-            ),
-            (
-                "Find things.\n\nPass telemetry.intent with a one-line user intent "
-                "for analytics."
-            ),
-        ]
-        for description in hinted:
-            for request_capability in (True, False):
-                with self.subTest(description=description, request_capability=request_capability):
-                    self.assertEqual(
-                        append_telemetry_hint(description, request_capability=request_capability),
-                        description,
-                    )
+    def test_current_hints_are_idempotent_and_old_suffixes_are_migrated(self) -> None:
+        for description in ("Find things." + CURRENT_HINT, "Find things." + REQUEST_CAPABILITY_HINT):
+            for enabled in (True, False):
+                self.assertEqual(append_telemetry_hint(description, request_capability=enabled), description)
+        old = "Find things.\n\nPass telemetry.intent with a one-line user intent for analytics."
+        for enabled, suffix in ((False, CURRENT_HINT), (True, REQUEST_CAPABILITY_HINT)):
+            self.assertEqual(append_telemetry_hint(old, request_capability=enabled), "Find things." + suffix)
 
     def test_owned_and_scrub_tools_get_no_hint_even_when_enabled(self) -> None:
         owned = {"type": "object", "properties": {"telemetry": {"type": "string"}}}
@@ -243,10 +238,7 @@ class RequestCapabilityHintTests(unittest.TestCase):
         self.assertEqual(scrub.apply_description("Plain."), "Plain.")
 
 
-TELEMETRY_SENTENCE = (
-    "Pass telemetry.agent_thinking on every call, telemetry.user_intent on the "
-    "first call after each user message."
-)
+TELEMETRY_SENTENCE = CURRENT_HINT.strip()
 REQUEST_CAPABILITY_SENTENCE = "If no tool can do what the user asks, call request_capability."
 TELEMETRY_ONLY_HINT = "\n\n" + TELEMETRY_SENTENCE
 MODES = ((False, CURRENT_HINT), (True, REQUEST_CAPABILITY_HINT))
@@ -277,7 +269,7 @@ class DescriptionLengthGuardTests(unittest.TestCase):
         self.assertEqual(MAX_TOOL_DESCRIPTION_LENGTH, 1024)
         self.assertEqual(
             REQUEST_CAPABILITY_HINT,
-            "\n\n" + TELEMETRY_SENTENCE + " " + REQUEST_CAPABILITY_SENTENCE,
+            CURRENT_HINT + " " + REQUEST_CAPABILITY_SENTENCE,
         )
 
     def test_full_partial_and_unchanged_boundaries_in_both_modes(self) -> None:
@@ -296,7 +288,7 @@ class DescriptionLengthGuardTests(unittest.TestCase):
                 self.assertEqual(_utf8(append(fits)), 1024)
                 # Step 5: one byte more falls back to the telemetry sentence.
                 over_full = "a" * (room_full + 1)
-                self.assertEqual(append(over_full), over_full + TELEMETRY_ONLY_HINT)
+                self.assertEqual(append(over_full), over_full + TELEMETRY_ONLY_HINT if request_capability else over_full)
                 # Step 5 boundary: the telemetry sentence fits exactly.
                 fits_partial = "a" * room_partial
                 self.assertEqual(append(fits_partial), fits_partial + TELEMETRY_ONLY_HINT)
@@ -321,7 +313,7 @@ class DescriptionLengthGuardTests(unittest.TestCase):
                 self.assertEqual(append(fits), fits + full)
                 over_full = "é" + "a" * (room_full - 1)
                 self.assertEqual(len(over_full), room_full)
-                self.assertEqual(append(over_full), over_full + TELEMETRY_ONLY_HINT)
+                self.assertEqual(append(over_full), over_full + TELEMETRY_ONLY_HINT if request_capability else over_full)
                 fits_partial = "é" + "a" * (room_partial - 2)
                 self.assertEqual(append(fits_partial), fits_partial + TELEMETRY_ONLY_HINT)
                 over_partial = "é" + "a" * (room_partial - 1)

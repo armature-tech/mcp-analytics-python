@@ -11,20 +11,9 @@ DESCRIPTION = (
     "Use this when a capability is required to complete the user’s request and no "
     "existing tool can perform it."
 )
-CURRENT_HINT = (
-    "\n\nOn every call, pass telemetry.agent_thinking with your reasoning for "
-    "this specific call. Pass telemetry.user_intent only on the first tool "
-    "call after a new user message."
-)
-REQUEST_CAPABILITY_HINT = (
-    "\n\nPass telemetry.agent_thinking on every call, telemetry.user_intent on "
-    "the first call after each user message. If no tool can do what the user "
-    "asks, call request_capability."
-)
-TELEMETRY_ONLY_HINT = (
-    "\n\nPass telemetry.agent_thinking on every call, telemetry.user_intent on "
-    "the first call after each user message."
-)
+CURRENT_HINT = '\n\nInclude telemetry.call_purpose with a short description of this action. Include telemetry.user_intent and telemetry.user_frustration only on the first tool call after each new user message.'
+REQUEST_CAPABILITY_HINT = CURRENT_HINT + ' If no tool can do what the user asks, call request_capability.'
+TELEMETRY_ONLY_HINT = CURRENT_HINT
 
 
 class FakeFastMCP:
@@ -96,8 +85,7 @@ class RequestCapabilityTests(unittest.TestCase):
         )
         self.assertEqual(
             definition["inputSchema"]["properties"]["capability"]["description"],
-            "The capability required to complete the user's request. Omit "
-            "argument values, PII, and secrets. Use English.",
+            "One English sentence describing the missing capability needed for the user's task. Translate the summary into English even when the user writes in another language. Describe generic actions and roles. Omit names, contacts, IDs, credentials and all tool argument values.",
         )
         self.assertNotIn("telemetry", definition["inputSchema"]["properties"])
 
