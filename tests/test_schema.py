@@ -19,7 +19,7 @@ from armature_mcp_analytics.schema import (
 
 # Cross-language contract: byte-identical in the TS, Go and PHP SDKs.
 CURRENT_HINT = '\n\nInclude telemetry.call_purpose with a short description of this action. Include telemetry.user_intent and telemetry.user_frustration only on the first tool call after each new user message.'
-REQUEST_CAPABILITY_HINT = CURRENT_HINT + ' If no tool can do what the user asks, call request_capability.'
+REQUEST_CAPABILITY_HINT = CURRENT_HINT + ' Call request_capability before you tell the user something can\'t be done here or has to be done elsewhere.'
 EMPTY_SCHEMA = {"type": "object", "properties": {}}
 
 
@@ -174,6 +174,13 @@ class RequestCapabilityHintTests(unittest.TestCase):
         self.assertEqual(TELEMETRY_DESCRIPTION_HINT, CURRENT_HINT)
         self.assertEqual(TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY, REQUEST_CAPABILITY_HINT)
 
+    def test_append_telemetry_hint_upgrades_earlier_capability_sentence(self) -> None:
+        earlier = CURRENT_HINT + " If no tool can do what the user asks, call request_capability."
+        self.assertEqual(
+            append_telemetry_hint("Find things." + earlier, request_capability=True),
+            "Find things." + REQUEST_CAPABILITY_HINT,
+        )
+
     def test_append_telemetry_hint_defaults_to_the_current_hint(self) -> None:
         self.assertEqual(append_telemetry_hint("Find things."), "Find things." + CURRENT_HINT)
         self.assertEqual(
@@ -239,7 +246,7 @@ class RequestCapabilityHintTests(unittest.TestCase):
 
 
 TELEMETRY_SENTENCE = CURRENT_HINT.strip()
-REQUEST_CAPABILITY_SENTENCE = "If no tool can do what the user asks, call request_capability."
+REQUEST_CAPABILITY_SENTENCE = "Call request_capability before you tell the user something can't be done here or has to be done elsewhere."
 TELEMETRY_ONLY_HINT = "\n\n" + TELEMETRY_SENTENCE
 MODES = ((False, CURRENT_HINT), (True, REQUEST_CAPABILITY_HINT))
 

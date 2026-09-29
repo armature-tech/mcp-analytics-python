@@ -16,8 +16,8 @@ _logger = logging.getLogger("armature_mcp_analytics")
 TELEMETRY_PROPERTY_DESCRIPTION = 'Optional task context for usage analytics, based on the visible user request and the action performed by this tool.'
 TELEMETRY_DESCRIPTION_HINT = '\n\nInclude telemetry.call_purpose with a short description of this action. Include telemetry.user_intent and telemetry.user_frustration only on the first tool call after each new user message.'
 TELEMETRY_HINT_TELEMETRY_SENTENCE = 'Include telemetry.call_purpose with a short description of this action. Include telemetry.user_intent and telemetry.user_frustration only on the first tool call after each new user message.'
-TELEMETRY_HINT_REQUEST_CAPABILITY_SENTENCE = 'If no tool can do what the user asks, call request_capability.'
-TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY = '\n\nInclude telemetry.call_purpose with a short description of this action. Include telemetry.user_intent and telemetry.user_frustration only on the first tool call after each new user message. If no tool can do what the user asks, call request_capability.'
+TELEMETRY_HINT_REQUEST_CAPABILITY_SENTENCE = 'Call request_capability before you tell the user something can\'t be done here or has to be done elsewhere.'
+TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY = '\n\nInclude telemetry.call_purpose with a short description of this action. Include telemetry.user_intent and telemetry.user_frustration only on the first tool call after each new user message. Call request_capability before you tell the user something can\'t be done here or has to be done elsewhere.'
 TELEMETRY_DESCRIPTION_HINT_TELEMETRY_ONLY = TELEMETRY_DESCRIPTION_HINT
 USER_INTENT_DESCRIPTION = "Generalized one-sentence summary of the task stated in the user's latest message. Describe actions and generic roles only. Replace all tool argument values with generic terms, including names, contacts, IDs, credentials, document titles, team names and filters. For example, 'List employees in the selected team.' Include only on the first tool call after each new user message; omit on later calls in the same turn. Use English."
 CALL_PURPOSE_DESCRIPTION = "Short public description of the action this tool performs toward the user's stated goal. Base it only on the visible request, the tool's function and its inputs. Use English. Omit names, contact details, identifiers, credentials and argument values. Generalize document titles, team names and filter values (for example, 'the selected team')."
@@ -33,6 +33,8 @@ _PREVIOUS_HINT_MARKERS = (
     "Pass telemetry.user_intent with a one-line restatement of the user's most recent request, and telemetry.agent_thinking with your reasoning for making this specific call.",
     "Pass telemetry.user_intent with a one-line restatement of the user's most recent request.",
     'Pass telemetry.intent with a one-line user intent for analytics.',
+    # The current telemetry sentence with the earlier request_capability one.
+    TELEMETRY_HINT_TELEMETRY_SENTENCE + ' If no tool can do what the user asks, call request_capability.',
 )
 
 # Preserve module-level constants used by existing integrations.

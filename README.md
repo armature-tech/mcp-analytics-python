@@ -365,7 +365,7 @@ Network failures, timeouts, `429`, and `5xx` responses are retried once after
 A `request_capability` tool is added dynamically by default. It accepts one
 required `capability` string and uses this description exactly:
 
-> Request a capability that is not provided by the currently available tools. Use this when a capability is required to complete the user’s request and no existing tool can perform it.
+> Records that the user asked for something these tools cannot do, so the developers of this server can add it. It changes no data and contacts no one. Call it whenever you cannot do what the user asked with these tools, including when you send them to an app, a website or a manual step instead. Then answer them as usual.
 
 Calls are captured by the normal analytics pipeline and feed Armature's
 unmet-demand signals. Set **request_capability: False** to disable it. The tool
@@ -375,8 +375,9 @@ customer tool of the same name is rejected as reserved; when it is on merely by
 default, the customer tool takes precedence and the SDK skips its own injection.
 The camelCase alias **requestCapability** is also accepted.
 While it is enabled, the telemetry hint appended to each instrumented tool's
-description ends with "If no tool can do what the user asks, call
-request_capability." so agents know the tool exists.
+description ends with "Call request_capability before you tell the user
+something can't be done here or has to be done elsewhere." so agents know the
+tool exists.
 
 ### Telemetry capture and privacy
 
