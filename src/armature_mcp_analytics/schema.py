@@ -7,7 +7,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from .capability import request_capability_enabled
-from .types import AnalyticsConfig, JsonDict, TelemetryArgs, TelemetryFieldMap, TelemetryMode
+from .types import (
+    AnalyticsConfig,
+    DescriptionLengthLogLevel,
+    JsonDict,
+    TelemetryArgs,
+    TelemetryFieldMap,
+    TelemetryMode,
+)
 
 _logger = logging.getLogger("armature_mcp_analytics")
 
@@ -71,6 +78,7 @@ def append_telemetry_hint(
     *,
     request_capability: bool = False,
     tool_name: str | None = None,
+    log_level: DescriptionLengthLogLevel | str = "warning",
 ) -> str:
     """Append the per-tool telemetry hint.
 
@@ -121,6 +129,7 @@ def append_telemetry_hint(
                 '[mcp-analytics] Tool "%s" description is too long for the full '
                 "Armature telemetry hint within 1024 characters; appended only the "
                 "telemetry sentence.",
+                log_level,
             )
         return partial
     if tool_name is not None:
@@ -130,6 +139,7 @@ def append_telemetry_hint(
             '[mcp-analytics] Tool "%s" description is too long to append the Armature '
             "telemetry hint without exceeding 1024 characters; leaving it unchanged. "
             "Telemetry is still collected.",
+            log_level,
         )
     return description
 
@@ -142,12 +152,14 @@ def telemetry_hint_appender(
     request_capability hint exactly when request_capability_enabled(config),
     the predicate that also decides whether the SDK injects that tool."""
     advertise_request_capability = request_capability_enabled(config)
+    log_level = description_length_log_level(config)
 
     def apply(description: str | None) -> str:
         return append_telemetry_hint(
             description,
             request_capability=advertise_request_capability,
             tool_name=tool_name,
+            log_level=log_level,
         )
 
     return apply
@@ -194,11 +206,22 @@ _warned_collisions: set[str] = set()
 _warned_long_descriptions: set[str] = set()
 
 
-def _warn_once_per_tool(seen: set[str], tool_name: str, message: str) -> None:
-    if tool_name in seen:
+_LOG_LEVELS = {"debug": logging.DEBUG, "info": logging.INFO, "warning": logging.WARNING}
+
+
+def description_length_log_level(config: AnalyticsConfig | None) -> str:
+    """The configured level of the description-length notice (either alias),
+    "warning" when unset."""
+    armature = (config or {}).get("armature") or {}
+    level = armature.get("description_length_log_level") or armature.get("descriptionLengthLogLevel")
+    return level if isinstance(level, str) else "warning"
+
+
+def _warn_once_per_tool(seen: set[str], tool_name: str, message: str, level: str = "warning") -> None:
+    if level == "none" or tool_name in seen:
         return
     seen.add(tool_name)
-    _logger.warning(message, tool_name)
+    _logger.log(_LOG_LEVELS.get(level, logging.WARNING), message, tool_name)
 
 
 def warn_telemetry_collision(tool_name: str) -> None:

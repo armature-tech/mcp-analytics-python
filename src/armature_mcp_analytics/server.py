@@ -31,6 +31,7 @@ from .schema import (
     append_telemetry_hint,
     create_telemetry_json_schema,
     decorate_input_schema_with_telemetry,
+    description_length_log_level,
     is_capture_enabled,
     schema_declares_telemetry,
     warn_telemetry_collision,
@@ -802,6 +803,7 @@ def instrument_fastmcp(server: Any, config: AnalyticsConfig | None = None) -> Fa
                     _description_from(func, decorator_kwargs),
                     request_capability=advertise_request_capability,
                     tool_name=str(name),
+                    log_level=description_length_log_level(config),
                 )
             wrapped = _wrap_handler(recorder, str(name), func, telemetry_mode)
             wrapped_signature: inspect.Signature | None = None

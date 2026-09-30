@@ -15,6 +15,7 @@ from armature_mcp_analytics.schema import (
     MAX_TOOL_DESCRIPTION_LENGTH,
     TELEMETRY_DESCRIPTION_HINT,
     TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY,
+    description_length_log_level,
 )
 
 # Cross-language contract: byte-identical in the TS, Go and PHP SDKs.
@@ -385,6 +386,27 @@ class DescriptionLengthGuardTests(unittest.TestCase):
         self.assertEqual(
             [record.getMessage() for record in logs.records],
             [_partial_warning("guard-partial"), _too_long_warning("guard-unchanged")],
+        )
+
+    def test_log_level_sets_the_notice_level(self) -> None:
+        partial = "x" * (1024 - _utf8(REQUEST_CAPABILITY_HINT) + 1)
+        with self.assertLogs("armature_mcp_analytics", level="DEBUG") as logs:
+            for level in ("debug", "info", "none"):
+                append_telemetry_hint(
+                    partial, request_capability=True, tool_name=f"level-{level}", log_level=level
+                )
+        self.assertEqual(
+            [(record.levelname, record.getMessage()) for record in logs.records],
+            [("DEBUG", _partial_warning("level-debug")), ("INFO", _partial_warning("level-info"))],
+        )
+
+    def test_description_length_log_level_reads_either_alias(self) -> None:
+        self.assertEqual(description_length_log_level(None), "warning")
+        self.assertEqual(
+            description_length_log_level({"armature": {"description_length_log_level": "info"}}), "info"
+        )
+        self.assertEqual(
+            description_length_log_level({"armature": {"descriptionLengthLogLevel": "none"}}), "none"
         )
 
     def test_no_warning_when_the_full_hint_fits_or_without_a_tool_name(self) -> None:

@@ -15,6 +15,7 @@ ToolStatus = Literal["ok", "error"]
 # "scrub" — capture is off, so strip a cached-schema client's telemetry but
 # export nothing. See packages/TELEMETRY-CONTRACT.md.
 TelemetryMode = Literal["injected", "owned", "scrub"]
+DescriptionLengthLogLevel = Literal["none", "debug", "info", "warning"]
 
 # Applied to sanitized tool inputs/outputs (and the normalized telemetry and
 # error strings) before they are serialized into event previews. Must return
@@ -126,6 +127,10 @@ class ArmatureConfig(TypedDict, total=False):
     # configured. Set either alias to False to disable.
     request_capability: bool
     requestCapability: bool
+    # Level of the one-time notice for a tool description too long for the
+    # full telemetry hint: "none", "debug", "info" or "warning" (default).
+    description_length_log_level: DescriptionLengthLogLevel
+    descriptionLengthLogLevel: DescriptionLengthLogLevel
 
 
 class AnalyticsConfig(TypedDict, total=False):
