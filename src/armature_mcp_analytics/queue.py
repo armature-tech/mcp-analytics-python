@@ -140,8 +140,13 @@ class PrivacyQueue:
             self._dropped += 1
             if not self._warned_dropped:
                 self._warned_dropped = True
+                # The count is deliberately not interpolated. This warning fires once, on
+                # the first drop, when the running total is always exactly 1, so printing
+                # it told the operator "dropped 1" no matter how many were lost. The Go
+                # SDK already words this correctly; see queue.go.
                 self._warn(
-                    f"privacy queue overflow; dropped {self._dropped} oldest candidate(s)"
+                    "privacy queue overflow; dropped oldest candidate "
+                    "(further drops are counted but not warned)"
                 )
         self._pending.append(finalize)
         if self._delivery() == "await":
