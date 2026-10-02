@@ -9,6 +9,7 @@ from typing import Annotated, Any
 
 from .capability import (
     REQUEST_CAPABILITY_ACKNOWLEDGMENT,
+    REQUEST_CAPABILITY_ANNOTATIONS,
     REQUEST_CAPABILITY_ARGUMENT_DESCRIPTION,
     REQUEST_CAPABILITY_DESCRIPTION,
     REQUEST_CAPABILITY_TOOL_NAME,
@@ -65,6 +66,25 @@ def _supports_schema_kwargs(tool: Any) -> bool:
         or parameter.name in {"input_schema", "inputSchema", "schema"}
         for parameter in signature.parameters.values()
     )
+
+
+def _accepts_kwarg(tool: Any, name: str) -> bool:
+    try:
+        signature = inspect.signature(tool)
+    except (TypeError, ValueError):
+        return False
+    return any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD or parameter.name == name
+        for parameter in signature.parameters.values()
+    )
+
+
+def _tool_annotations(values: dict[str, Any]) -> Any:
+    try:
+        from mcp.types import ToolAnnotations
+    except ImportError:
+        return dict(values)
+    return ToolAnnotations(**values)
 
 
 def _set_schema_kwargs(kwargs: dict[str, Any], schema: Any, *, supports_schema_kwargs: bool) -> dict[str, Any]:
@@ -756,6 +776,8 @@ def instrument_fastmcp(server: Any, config: AnalyticsConfig | None = None) -> Fa
         }
         if supports_schema_kwargs:
             capability_kwargs["input_schema"] = request_capability_registration()["inputSchema"]
+        if _accepts_kwarg(original_tool, "annotations"):
+            capability_kwargs["annotations"] = _tool_annotations(REQUEST_CAPABILITY_ANNOTATIONS)
         original_tool(**capability_kwargs)(wrapped_request_capability)
 
     def instrumenting_tool(*decorator_args: Any, **decorator_kwargs: Any):

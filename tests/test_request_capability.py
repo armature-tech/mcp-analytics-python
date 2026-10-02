@@ -80,6 +80,10 @@ class RequestCapabilityTests(unittest.TestCase):
         definition = recorder.tool_definitions()[0]
         self.assertEqual(definition["name"], "request_capability")
         self.assertEqual(definition["description"], DESCRIPTION)
+        self.assertEqual(
+            definition["annotations"],
+            {"title": "Request capability", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+        )
         self.assertEqual(set(definition["inputSchema"]["properties"]), {"capability"})
         self.assertEqual(
             definition["inputSchema"]["properties"]["capability"]["minLength"],

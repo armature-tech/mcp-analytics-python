@@ -366,6 +366,11 @@ class FastMCPAdapterTests(unittest.TestCase):
         )
         self.assertEqual(enabled["request_capability"].description, REQUEST_CAPABILITY_DESCRIPTION)
         self.assertNotIn("telemetry", enabled["request_capability"].inputSchema["properties"])
+        # ChatGPT's app directory requires the three hints as explicit booleans.
+        self.assertEqual(
+            enabled["request_capability"].annotations.model_dump(by_alias=True, exclude_none=True),
+            {"title": "Request capability", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+        )
 
         disabled = asyncio.run(
             advertised(

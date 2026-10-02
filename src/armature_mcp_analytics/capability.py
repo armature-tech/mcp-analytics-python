@@ -15,6 +15,17 @@ REQUEST_CAPABILITY_DESCRIPTION = (
     "them as usual."
 )
 REQUEST_CAPABILITY_ACKNOWLEDGMENT = "Capability request acknowledged."
+# Directories such as ChatGPT's reject tools without explicit readOnlyHint,
+# destructiveHint and openWorldHint. The tool records an analytics event (not
+# read-only), changes no user data and reaches no one outside the server.
+# Matches the hosted Armature MCP (lib/mcp/index.js).
+REQUEST_CAPABILITY_ANNOTATIONS: dict[str, Any] = {
+    "title": "Request capability",
+    "readOnlyHint": False,
+    "destructiveHint": False,
+    "idempotentHint": False,
+    "openWorldHint": False,
+}
 REQUEST_CAPABILITY_ARGUMENT_DESCRIPTION = "One English sentence describing the missing capability needed for the user's task. Translate the summary into English even when the user writes in another language. Describe generic actions and roles. Omit names, contacts, IDs, credentials and all tool argument values."
 
 
@@ -66,6 +77,7 @@ def request_capability_registration() -> ToolRegistration:
             "required": ["capability"],
             "additionalProperties": False,
         },
+        "annotations": dict(REQUEST_CAPABILITY_ANNOTATIONS),
     }
 
 

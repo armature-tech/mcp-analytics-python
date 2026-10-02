@@ -702,6 +702,10 @@ class OfficialSdkV2Tests(unittest.TestCase):
             )
             # The SDK-owned tool itself stays undecorated.
             self.assertEqual(tools["request_capability"].description, REQUEST_CAPABILITY_DESCRIPTION)
+            self.assertEqual(
+                tools["request_capability"].annotations.model_dump(by_alias=True, exclude_none=True),
+                {"title": "Request capability", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+            )
 
         asyncio.run(check())
 
