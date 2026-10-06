@@ -25,11 +25,7 @@ import warnings
 
 from armature_mcp_analytics import instrument_fastmcp
 from armature_mcp_analytics import sdk_v2
-from armature_mcp_analytics.capability import REQUEST_CAPABILITY_DESCRIPTION
-from armature_mcp_analytics.schema import (
-    TELEMETRY_DESCRIPTION_HINT,
-    TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY,
-)
+from armature_mcp_analytics.capability import SEND_FEEDBACK_DESCRIPTION
 from armature_mcp_analytics.events import (
     MAX_REQUEST_META_BYTES,
     REQUEST_META_TRUNCATION_MARKER,
@@ -342,7 +338,7 @@ class InjectedContextPipelineTests(unittest.TestCase):
             {
                 "armature": {
                     "delivery": "await",
-                    "request_capability": False,
+                    "send_feedback": False,
                     "actor_id": "v2-fake-actor",
                     "emit": batches.append,
                 }
@@ -538,7 +534,7 @@ class Mcp2GuardWarningTests(unittest.TestCase):
                 {
                     "armature": {
                         "delivery": "await",
-                        "request_capability": False,
+                        "send_feedback": False,
                         "actor_id": "guard-actor",
                         "emit": batches.append,
                     }
@@ -571,7 +567,7 @@ class Mcp2GuardWarningTests(unittest.TestCase):
                 {
                     "armature": {
                         "delivery": "await",
-                        "request_capability": False,
+                        "send_feedback": False,
                         "actor_id": "guard-actor",
                         "emit": lambda batch: None,
                     }
@@ -597,7 +593,7 @@ class Mcp2GuardWarningTests(unittest.TestCase):
             warnings.simplefilter("always")
             instrument_fastmcp(
                 _FakeFastMCP(),
-                {"armature": {"delivery": "await", "request_capability": False, "emit": lambda batch: None}},
+                {"armature": {"delivery": "await", "send_feedback": False, "emit": lambda batch: None}},
             )
         self.assertTrue(
             any("not a recognized SDK v2 surface" in str(warning.message) for warning in caught),
@@ -614,7 +610,7 @@ class Mcp2GuardWarningTests(unittest.TestCase):
                 {
                     "armature": {
                         "delivery": "await",
-                        "request_capability": False,
+                        "send_feedback": False,
                         "actor_id": "guard-actor",
                         "emit": batches.append,
                     }
@@ -652,7 +648,7 @@ class OfficialSdkV2Tests(unittest.TestCase):
             {
                 "armature": {
                     "delivery": "await",
-                    "request_capability": False,
+                    "send_feedback": False,
                     "actor_id": "official-v2-actor",
                     "emit": batches.append,
                 }
@@ -676,35 +672,45 @@ class OfficialSdkV2Tests(unittest.TestCase):
             schema = getattr(tool, "input_schema", None) or getattr(tool, "inputSchema", None)
             properties = schema.get("properties", {})
             self.assertIn("telemetry", properties)
-            self.assertIn("user_intent", properties["telemetry"].get("properties", {}))
+            self.assertEqual(
+                set(properties["telemetry"].get("properties", {})), {"user_intent", "call_purpose"}
+            )
             self.assertNotIn(ARMATURE_CTX_KWARG, properties)
-            self.assertIn("telemetry.user_intent", tool.description or "")
-            # request_capability is disabled here, so the plain hint stays.
-            self.assertEqual(tool.description, "Look up a customer." + TELEMETRY_DESCRIPTION_HINT)
+            # The SDK never adds text to the description.
+            self.assertEqual(tool.description, "Look up a customer.")
 
         asyncio.run(check())
 
-    def test_enabled_request_capability_is_advertised_in_the_tool_hint(self) -> None:
-        mcp = MCPServer("v2-hint-under-test")
-        instrument_fastmcp(mcp, {"armature": {"emit": lambda _batch: None}})
+    def test_send_feedback_is_on_by_default_and_never_in_other_descriptions(self) -> None:
+        def build(config: dict) -> "MCPServer":
+            mcp = MCPServer("v2-hint-under-test")
+            instrument_fastmcp(mcp, config)
 
-        @mcp.tool()
-        def lookup_customer(customer_id: str) -> dict:
-            """Look up a customer."""
-            return {"customer_id": customer_id}
+            @mcp.tool()
+            def lookup_customer(customer_id: str) -> dict:
+                """Look up a customer."""
+                return {"customer_id": customer_id}
+
+            return mcp
+
+        async def tools_of(mcp: "MCPServer") -> dict:
+            return {tool.name: tool for tool in await mcp.list_tools()}
+
+        disabled = asyncio.run(tools_of(build({"armature": {"emit": lambda _batch: None, "send_feedback": False}})))
+        self.assertEqual(set(disabled), {"lookup_customer"})
+        self.assertEqual(disabled["lookup_customer"].description, "Look up a customer.")
+
+        mcp = build({"armature": {"emit": lambda _batch: None}})
 
         async def check() -> None:
-            tools = {tool.name: tool for tool in await mcp.list_tools()}
-            self.assertIn("request_capability", tools)
-            self.assertEqual(
-                tools["lookup_customer"].description,
-                "Look up a customer." + TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY,
-            )
+            tools = await tools_of(mcp)
+            self.assertEqual(set(tools), {"lookup_customer", "send_feedback"})
+            self.assertEqual(tools["lookup_customer"].description, "Look up a customer.")
             # The SDK-owned tool itself stays undecorated.
-            self.assertEqual(tools["request_capability"].description, REQUEST_CAPABILITY_DESCRIPTION)
+            self.assertEqual(tools["send_feedback"].description, SEND_FEEDBACK_DESCRIPTION)
             self.assertEqual(
-                tools["request_capability"].annotations.model_dump(by_alias=True, exclude_none=True),
-                {"title": "Request capability", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+                tools["send_feedback"].annotations.model_dump(by_alias=True, exclude_none=True),
+                {"title": "Send feedback", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
             )
 
         asyncio.run(check())
@@ -798,7 +804,7 @@ class FastMCP4Tests(unittest.TestCase):
             {
                 "armature": {
                     "delivery": "await",
-                    "request_capability": False,
+                    "send_feedback": False,
                     "actor_id": "fastmcp4-actor",
                     "emit": batches.append,
                 }
@@ -847,7 +853,7 @@ class FastMCP4Tests(unittest.TestCase):
             {
                 "armature": {
                     "delivery": "await",
-                    "request_capability": False,
+                    "send_feedback": False,
                     "actor_id": "fastmcp4-ambient-actor",
                     "emit": batches.append,
                 }

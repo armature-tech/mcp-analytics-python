@@ -50,6 +50,7 @@ from .schema import (
     normalize_telemetry_args,
     plan_tool_telemetry,
     schema_declares_telemetry,
+    strip_telemetry_hint,
 )
 from .server import FastMCPInstrumentation, instrument_fastmcp, with_mcp_analytics
 from .stateless_http import (
@@ -131,5 +132,6 @@ __all__ = [
     "resolve_stateless_http_session",
     "sanitize_value",
     "schema_declares_telemetry",
+    "strip_telemetry_hint",
     "with_mcp_analytics",
 ]

@@ -310,10 +310,8 @@ def _assemble_tool_call_event(
         "tool_name": candidate["tool_name"],
         "user_intent": t.get("user_intent"),
         "agent_thinking": t.get("agent_thinking"),
-        "user_frustration": t.get("user_frustration"),
         "intent": t.get("user_intent"),
         "context": t.get("agent_thinking"),
-        "frustration_level": t.get("user_frustration"),
         "input_preview": input_preview,
     }
     if capability_request:

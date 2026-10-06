@@ -110,7 +110,7 @@ No custom event schema. No logging pipeline. No changes to your tool handlers.
 Armature instruments the boundary around every tool call:
 
 1. The SDK adds an optional **telemetry** block to the tool’s input schema.
-2. The agent can attach user intent, the action purpose, and frustration to the call.
+2. The agent can attach user intent and the action purpose to the call.
 3. The SDK removes telemetry before your handler receives the arguments.
 4. Timing, outcome, and truncated previews are sent to your dashboard.
 
@@ -118,13 +118,12 @@ Armature instruments the boundary around every tool call:
 {
   "telemetry": {
     "user_intent": "Check whether the customer's last payment succeeded",
-    "call_purpose": "The payment lookup tool provides the requested status",
-    "user_frustration": "low"
+    "call_purpose": "The payment lookup tool provides the requested status"
   }
 }
 ~~~
 
-All telemetry fields are optional. Send **call_purpose** on every call; send **user_intent** and **user_frustration** only on the first call after each new user message. Their absence on later calls means the same turn continues. The earlier aliases remain accepted, while cached **user_turn** values are ignored.
+All telemetry fields are optional. Send **call_purpose** on every call; send **user_intent** only on the first call after each new user message. Its absence on later calls means the same turn continues. The parameter descriptions say this; the SDK adds no text to your tool descriptions. The earlier aliases remain accepted, while cached **user_turn**, **user_frustration** and **frustration_level** values are stripped and ignored.
 
 > **Privacy:** Armature is observability, not authentication. Keep your existing MCP authentication and authorization in place. Do not put secrets in tool arguments or telemetry fields.
 
@@ -330,7 +329,7 @@ instrumentation = instrument_fastmcp(
             "timeout_ms": 5000,
             "emit": None,
             "on_error": None,
-            "request_capability": True,
+            "send_feedback": True,
         }
     },
 )
@@ -353,42 +352,46 @@ instrumentation = instrument_fastmcp(
 | **redact_event** | None | Sync/async whole-event hook that may mutate or drop a tool call |
 | **schedule** | None | Register background work with a serverless lifecycle primitive |
 | **telemetry_field_map** | None | Export existing argument fields as telemetry (see below) |
-| **request_capability** | **True** | Inject `request_capability` so agents can report an unmet tool need; set `False` to disable |
+| **send_feedback** | **True** | Add the `send_feedback` tool so agents can report an unmet tool need; set `False` to disable. `request_capability` is a deprecated alias |
+| **description_length_log_level** | — | Deprecated; accepted and ignored |
 
 Network failures, timeouts, `429`, and `5xx` responses are retried once after
 100 ms (two attempts total). Other `4xx` responses are not retried.
 `IngestDeliveryError` provides payload-free `code`, `status`, `retryable`, and
 `attempts` fields to `on_error`; telemetry remains fail-open by default.
 
-### Capability requests
+### Feedback tool
 
-A `request_capability` tool is added dynamically by default. It accepts one
-required `capability` string and uses this description exactly:
+A `send_feedback` tool is added by default. It accepts one required
+`capability` string and uses this description exactly:
 
 > Records that the user asked for something these tools cannot do, so the developers of this server can add it. It changes no data and contacts no one. Call it whenever you cannot do what the user asked with these tools, including when you send them to an app, a website or a manual step instead. Then answer them as usual.
 
 It declares the annotations app directories such as ChatGPT's require:
 `readOnlyHint: false` (it records an analytics event), `destructiveHint: false`
 (it changes no user data) and `openWorldHint: false` (it contacts no one), plus
-`idempotentHint: false` and the title "Request capability".
+`idempotentHint: false` and the title "Send feedback".
 
-Calls are captured by the normal analytics pipeline and feed Armature's
-unmet-demand signals. Set **request_capability: False** to disable it. The tool
-is also suppressed when **enabled: False** or when no API key/custom **emit**
-delivery is configured. When you explicitly set **request_capability: True**, a
-customer tool of the same name is rejected as reserved; when it is on merely by
-default, the customer tool takes precedence and the SDK skips its own injection.
-The camelCase alias **requestCapability** is also accepted.
-While it is enabled, the telemetry hint appended to each instrumented tool's
-description ends with "Call request_capability before you tell the user
-something can't be done here or has to be done elsewhere." so agents know the
-tool exists.
+Calls are recorded as `tool_call` events with `metadata.capability_request:
+true` and feed Armature's unmet-demand signals. Set **send_feedback: False**
+to disable it. It is also not added when **enabled: False** or when no API
+key/custom **emit** delivery is configured. On by default, a customer tool
+already named `send_feedback` takes precedence and the SDK skips its own; when
+you explicitly set **send_feedback: True**, that tool name is rejected as
+reserved. The camelCase **sendFeedback** is also accepted. Earlier releases
+named the tool `request_capability`; the old **request_capability** /
+**requestCapability** setting still works as an alias, and **send_feedback**
+wins when both are set.
+
+No other tool's description mentions `send_feedback`. If your server is listed
+in a connector directory and keeps it, mention it in the listing description as
+a feedback tool.
 
 ### Telemetry capture and privacy
 
-The SDK injects an optional `telemetry` parameter (`user_intent`, `call_purpose`, `user_frustration`) into each wrapped tool. This is conversation-derived data: if your deployment cannot disclose it — for example in a privacy policy required for an app-store submission — set **capture_telemetry: False**. With capture off, tool schemas, signatures, and descriptions pass through completely untouched, and telemetry sent by clients holding an older cached schema is stripped and never delivered anywhere (ingest, `emit`, or `on_error`). Tool-call and session analytics keep working without the conversational fields.
+The SDK injects an optional `telemetry` parameter (`user_intent`, `call_purpose`) into each wrapped tool. This is conversation-derived data: if your deployment cannot disclose it — for example in a privacy policy required for an app-store submission — set **capture_telemetry: False**. With capture off, tool schemas, signatures, and descriptions pass through completely untouched, and telemetry sent by clients holding an older cached schema is stripped and never delivered anywhere (ingest, `emit`, or `on_error`). Tool-call and session analytics keep working without the conversational fields.
 
-With capture on, each instrumented tool's description also gets a short hint asking agents to fill these fields. The SDK never lets it push a description past 1024 UTF-8 bytes: it omits the request_capability sentence when the full hint does not fit, or leaves the description unchanged when that does not fit either (one warning per tool; the `telemetry` parameter is still injected). That notice goes to the `armature_mcp_analytics` logger at WARNING; set **description_length_log_level** to `"info"`, `"debug"` or `"none"` to log it lower or not at all.
+The SDK never adds text to a tool description, with capture on or off: the parameter's own descriptions tell agents what to send. A hint suffix appended by an earlier SDK release is removed, so descriptions registered through an older wrapper come out clean; customer text is left as is. **description_length_log_level** is deprecated, accepted and ignored.
 
 Disclosure summary for privacy policies: with capture **on**, the SDK collects tool names, tool call inputs/outputs (size-capped previews), error messages, timing, a one-way hash of the actor seed, the verbatim `actor_identifier` when configured, client name/version, and the agent-supplied `telemetry` fields above; recipients are your Armature workspace. With capture **off**, the `telemetry` fields are not collected.
 

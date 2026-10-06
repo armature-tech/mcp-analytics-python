@@ -8,21 +8,17 @@ import unittest
 from pathlib import Path
 
 from armature_mcp_analytics import instrument_fastmcp
-from armature_mcp_analytics.capability import REQUEST_CAPABILITY_DESCRIPTION
+from armature_mcp_analytics.capability import SEND_FEEDBACK_DESCRIPTION
 from armature_mcp_analytics.schema import (
     CALL_PURPOSE_DESCRIPTION,
-    TELEMETRY_DESCRIPTION_HINT,
     TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY,
-    TELEMETRY_HINT_TELEMETRY_SENTENCE,
     TELEMETRY_PROPERTY_DESCRIPTION,
-    USER_FRUSTRATION_DESCRIPTION,
     USER_INTENT_DESCRIPTION,
 )
 
 TELEMETRY_FIELD_DESCRIPTIONS = {
     "user_intent": USER_INTENT_DESCRIPTION,
     "call_purpose": CALL_PURPOSE_DESCRIPTION,
-    "user_frustration": USER_FRUSTRATION_DESCRIPTION,
 }
 
 
@@ -64,7 +60,9 @@ class FastMCPAdapterTests(unittest.TestCase):
         registered = mcp.tools["lookup_customer"]
         schema = registered["kwargs"]["input_schema"]
         self.assertIn("telemetry", schema["properties"])
-        self.assertIn("telemetry.user_intent", registered["kwargs"]["description"])
+        # Nothing is added to the description: the docstring stays the source.
+        self.assertNotIn("description", registered["kwargs"])
+        self.assertEqual(registered["func"].__doc__, "Look up a customer.")
 
         result = asyncio.run(lookup_customer(customer_id="cus_123", telemetry={"user_intent": "find customer"}))
         self.assertEqual(result, {"customer_id": "cus_123"})
@@ -258,7 +256,9 @@ class FastMCPAdapterTests(unittest.TestCase):
             self.fail(f"{dependency} must be importable when ARMATURE_REQUIRE_FASTMCP is set")
         self.skipTest(f"{dependency} optional dependency is not installed")
 
-    def assert_advertised_telemetry_schema(self, input_schema: dict, description: str) -> None:
+    def assert_advertised_telemetry_schema(
+        self, input_schema: dict, description: str | None, expected_description: str | None
+    ) -> None:
         # The full V1 telemetry schema must reach the *advertised* inputSchema,
         # not just runtime extraction — calling agents only learn the fields
         # exist from tools/list. FastMCP builds this schema with pydantic from
@@ -268,11 +268,14 @@ class FastMCPAdapterTests(unittest.TestCase):
         telemetry = input_schema["properties"].get("telemetry")
         self.assertIsNotNone(telemetry, f"telemetry property missing from advertised schema: {input_schema}")
         self.assertEqual(telemetry.get("description"), TELEMETRY_PROPERTY_DESCRIPTION)
-        for field, expected_description in TELEMETRY_FIELD_DESCRIPTIONS.items():
+        # Exactly user_intent and call_purpose: user_frustration is gone.
+        self.assertEqual(set(telemetry.get("properties", {})), set(TELEMETRY_FIELD_DESCRIPTIONS))
+        for field, field_description in TELEMETRY_FIELD_DESCRIPTIONS.items():
             field_schema = telemetry.get("properties", {}).get(field)
             self.assertIsNotNone(field_schema, f"telemetry.{field} missing from advertised schema: {telemetry}")
-            self.assertEqual(field_schema.get("description"), expected_description)
-        self.assertIn("telemetry.user_intent", description)
+            self.assertEqual(field_schema.get("description"), field_description)
+        # The SDK never adds text to the tool description.
+        self.assertEqual(description, expected_description)
 
     def test_external_fastmcp_advertises_telemetry_schema_on_the_wire(self) -> None:
         # Runs against whichever fastmcp is installed; CI executes this suite
@@ -291,7 +294,7 @@ class FastMCPAdapterTests(unittest.TestCase):
             {
                 "armature": {
                     "delivery": "await",
-                    "request_capability": False,
+                    "send_feedback": False,
                     "actor_id": "real-fastmcp-actor",
                     "emit": batches.append,
                 }
@@ -314,8 +317,11 @@ class FastMCPAdapterTests(unittest.TestCase):
                 # fastmcp 2.x the kwargs form silently registered nothing
                 # before the re-entry guard existed.
                 self.assertEqual(set(tools), {"lookup_customer", "named_lookup"})
+                expected = {"lookup_customer": "Look up a customer.", "named_lookup": "Named lookup."}
                 for tool in tools.values():
-                    self.assert_advertised_telemetry_schema(tool.inputSchema, tool.description)
+                    self.assert_advertised_telemetry_schema(
+                        tool.inputSchema, tool.description, expected[tool.name]
+                    )
 
                 await client.call_tool(
                     "lookup_customer",
@@ -336,7 +342,7 @@ class FastMCPAdapterTests(unittest.TestCase):
         ]
         self.assertEqual(intents, ["real FastMCP", "named form"])
 
-    def test_external_fastmcp_tools_list_advertises_request_capability_hint(self) -> None:
+    def test_external_fastmcp_send_feedback_is_on_by_default_and_never_in_descriptions(self) -> None:
         try:
             from fastmcp import Client, FastMCP
         except ImportError:
@@ -359,61 +365,53 @@ class FastMCPAdapterTests(unittest.TestCase):
 
         # On by default once a delivery path exists.
         enabled = asyncio.run(advertised(build({"armature": {"emit": lambda _batch: None}})))
-        self.assertEqual(set(enabled), {"lookup_customer", "request_capability"})
-        self.assertEqual(
-            enabled["lookup_customer"].description,
-            "Look up a customer." + TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY,
-        )
-        self.assertEqual(enabled["request_capability"].description, REQUEST_CAPABILITY_DESCRIPTION)
-        self.assertNotIn("telemetry", enabled["request_capability"].inputSchema["properties"])
+        self.assertEqual(set(enabled), {"lookup_customer", "send_feedback"})
+        # It adds nothing to any other tool's description.
+        self.assertEqual(enabled["lookup_customer"].description, "Look up a customer.")
+        self.assertEqual(enabled["send_feedback"].description, SEND_FEEDBACK_DESCRIPTION)
+        self.assertNotIn("telemetry", enabled["send_feedback"].inputSchema["properties"])
         # ChatGPT's app directory requires the three hints as explicit booleans.
         self.assertEqual(
-            enabled["request_capability"].annotations.model_dump(by_alias=True, exclude_none=True),
-            {"title": "Request capability", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+            enabled["send_feedback"].annotations.model_dump(by_alias=True, exclude_none=True),
+            {"title": "Send feedback", "readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
         )
 
-        disabled = asyncio.run(
-            advertised(
-                build({"armature": {"emit": lambda _batch: None, "request_capability": False}})
-            )
-        )
-        self.assertEqual(set(disabled), {"lookup_customer"})
-        self.assertEqual(
-            disabled["lookup_customer"].description,
-            "Look up a customer." + TELEMETRY_DESCRIPTION_HINT,
-        )
+        for key in ("send_feedback", "request_capability"):
+            disabled = asyncio.run(advertised(build({"armature": {"emit": lambda _batch: None, key: False}})))
+            self.assertEqual(set(disabled), {"lookup_customer"}, key)
+            self.assertEqual(disabled["lookup_customer"].description, "Look up a customer.")
 
-    def test_external_fastmcp_applies_the_description_length_guard(self) -> None:
+    def test_external_fastmcp_descriptions_are_unchanged_and_old_hints_removed(self) -> None:
         try:
             from fastmcp import Client, FastMCP
         except ImportError:
             self.skip_missing_dependency("fastmcp")
 
-        telemetry_only = "\n\n" + TELEMETRY_HINT_TELEMETRY_SENTENCE
-        partial = "p" * (
-            1024 - len(TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY.encode("utf-8")) + 1
-        )
-        unchanged = "u" * (1024 - len(telemetry_only.encode("utf-8")) + 1)
+        long = "Look up a customer. " + "l" * 2000
         mcp = FastMCP("analytics-long-description-test")
-        instrument_fastmcp(mcp, {"armature": {"emit": lambda _batch: None}})
+        instrument_fastmcp(mcp, {"armature": {"emit": lambda _batch: None, "send_feedback": True}})
 
-        @mcp.tool(name="partial_real_tool", description=partial)
-        def partial_real_tool(customer_id: str) -> dict:
-            return {"customer_id": customer_id}
+        with self.assertNoLogs("armature_mcp_analytics", level="DEBUG"):
 
-        @mcp.tool(name="unchanged_real_tool", description=unchanged)
-        def unchanged_real_tool(customer_id: str) -> dict:
-            return {"customer_id": customer_id}
+            @mcp.tool(name="long_real_tool", description=long)
+            def long_real_tool(customer_id: str) -> dict:
+                return {"customer_id": customer_id}
+
+            @mcp.tool(
+                name="old_hint_tool",
+                description="Look up a customer." + TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY,
+            )
+            def old_hint_tool(customer_id: str) -> dict:
+                return {"customer_id": customer_id}
 
         async def advertised() -> dict:
             async with Client(mcp) as client:
                 return {tool.name: tool for tool in await client.list_tools()}
 
         tools = asyncio.run(advertised())
-        self.assertEqual(tools["partial_real_tool"].description, partial + telemetry_only)
-        self.assertEqual(tools["unchanged_real_tool"].description, unchanged)
-        for name in ("partial_real_tool", "unchanged_real_tool"):
-            self.assertLessEqual(len(tools[name].description.encode("utf-8")), 1024)
+        self.assertEqual(tools["long_real_tool"].description, long)
+        self.assertEqual(tools["old_hint_tool"].description, "Look up a customer.")
+        for name in ("long_real_tool", "old_hint_tool"):
             self.assertIn("telemetry", tools[name].inputSchema["properties"])
 
     def test_official_sdk_fastmcp_advertises_telemetry_schema(self) -> None:
@@ -443,13 +441,11 @@ class FastMCPAdapterTests(unittest.TestCase):
         async def run() -> None:
             tools = await mcp.list_tools()
             lookup = next(tool for tool in tools if tool.name == "lookup_customer")
-            self.assert_advertised_telemetry_schema(lookup.inputSchema, lookup.description)
-            # request_capability is on by default with an emit sink, so the
-            # hint points agents to it.
-            self.assertEqual(
-                lookup.description,
-                "Look up a customer." + TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY,
+            self.assert_advertised_telemetry_schema(
+                lookup.inputSchema, lookup.description, "Look up a customer."
             )
+            # send_feedback is on by default with an emit sink.
+            self.assertEqual(sorted(tool.name for tool in tools), ["lookup_customer", "send_feedback"])
 
             await mcp.call_tool(
                 "lookup_customer",
@@ -482,7 +478,7 @@ class FastMCPAdapterTests(unittest.TestCase):
         def build(instrument: bool) -> FastMCP:
             mcp = FastMCP("schema-parity")
             if instrument:
-                instrument_fastmcp(mcp, {"armature": {"delivery": "await", "request_capability": False, "emit": lambda batch: None}})
+                instrument_fastmcp(mcp, {"armature": {"delivery": "await", "send_feedback": False, "emit": lambda batch: None}})
             mcp.tool()(fixture.get_customer)
             mcp.tool()(fixture.get_customer_model)
             return mcp
@@ -532,7 +528,7 @@ class FastMCPAdapterTests(unittest.TestCase):
                         "armature": {
                             "delivery": "await",
                             "capture_telemetry": False,
-                            "request_capability": False,
+                            "send_feedback": False,
                             "actor_id": "capture-off-actor",
                             "emit": batches.append,
                         }
@@ -603,7 +599,7 @@ class FastMCPAdapterTests(unittest.TestCase):
                         "armature": {
                             "delivery": "await",
                             "capture_telemetry": False,
-                            "request_capability": False,
+                            "send_feedback": False,
                             "actor_id": "capture-off-actor",
                             "emit": batches.append,
                         }

@@ -13,9 +13,9 @@ description: >
 
 You are integrating the `armature-mcp-analytics` SDK into a customer's Python
 MCP server. The SDK decorates each tool's input schema with an optional
-`telemetry` block (`user_intent`, `call_purpose`, `user_frustration`), strips that block
+`telemetry` block (`user_intent`, `call_purpose`), strips that block
 before the handler runs, and posts an authenticated batch to Armature after each
-call.
+call. It adds no text to tool descriptions.
 
 The most common Python shape is FastMCP. Support both import paths:
 
@@ -144,7 +144,7 @@ instrumentation = instrument_fastmcp(
         "armature": {
             "api_key": os.getenv("ANALYTICS_INGEST_API_KEY"),
             "delivery": "await",
-            # request_capability is on by default; add "request_capability": False to disable (see Step 7).
+            # send_feedback is on by default; add "send_feedback": False to disable (see Step 7).
         }
     },
 )
@@ -240,7 +240,8 @@ Two checks. Do not skip them.
 
 **Check 1: schema includes telemetry.** Start the server or call its tool
 listing helper. Confirm at least one tool's input schema contains a
-`telemetry` property and the tool description mentions `telemetry.user_intent`.
+`telemetry` property with `user_intent` and `call_purpose`, and that the tool
+description is exactly what the customer wrote.
 
 **Check 2: a real tool call produces a batch.** Set `armature.emit` to a stub,
 invoke a tool with telemetry, and assert the captured batch has a `tool_call`
@@ -310,11 +311,13 @@ Tell the user briefly:
 - Where they must set `ANALYTICS_INGEST_API_KEY` and the regional
   `ANALYTICS_INGEST_URL`; call out that the URL is required for EU.
 - That missing API keys no-op for local development.
-- That the SDK adds a `request_capability` tool (on by default) so the agent can
-  report a capability the current tools can't satisfy — this is what surfaces
-  "unmet demand" use cases in Armature. It's recommended, so leave it on. Tell the
-  user it's enabled and offer to turn it off: set `"request_capability": False` in
-  the `armature` config if they'd rather not expose it.
+- That the SDK adds a `send_feedback` tool (on by default) so the agent can
+  report a capability the current tools can't satisfy; this is what surfaces
+  "unmet demand" use cases in Armature. It's recommended, so leave it on. Tell
+  the user it's enabled and offer to turn it off: set `"send_feedback": False`
+  in the `armature` config. No other tool's description mentions it. If the
+  server is listed in a connector directory and keeps it, the listing
+  description should mention it as a feedback tool.
 
 ## What NOT to do
 

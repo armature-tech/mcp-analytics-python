@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import functools
 import os
 import unittest
 from unittest import mock
@@ -10,17 +9,35 @@ from armature_mcp_analytics import (
     decorate_input_schema_with_telemetry,
     extract_telemetry_arguments,
     plan_tool_telemetry,
+    strip_telemetry_hint,
 )
 from armature_mcp_analytics.schema import (
-    MAX_TOOL_DESCRIPTION_LENGTH,
+    CALL_PURPOSE_DESCRIPTION,
     TELEMETRY_DESCRIPTION_HINT,
     TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY,
-    description_length_log_level,
+    TELEMETRY_PROPERTY_DESCRIPTION,
+    USER_INTENT_DESCRIPTION,
 )
 
-# Cross-language contract: byte-identical in the TS, Go and PHP SDKs.
-CURRENT_HINT = '\n\nInclude telemetry.call_purpose with a short description of this action. Include telemetry.user_intent and telemetry.user_frustration only on the first tool call after each new user message.'
-REQUEST_CAPABILITY_HINT = CURRENT_HINT + ' Call request_capability before you tell the user something can\'t be done here or has to be done elsewhere.'
+# Hint suffixes earlier releases appended. Cross-language contract: the SDK
+# recognizes and removes these exact suffixes and never appends anything.
+OLD_HINT = '\n\nInclude telemetry.call_purpose with a short description of this action. Include telemetry.user_intent and telemetry.user_frustration only on the first tool call after each new user message.'
+OLD_REQUEST_CAPABILITY_HINT = OLD_HINT + ' Call request_capability before you tell the user something can\'t be done here or has to be done elsewhere.'
+EARLIER_REQUEST_CAPABILITY_HINT = OLD_HINT + " If no tool can do what the user asks, call request_capability."
+OLDER_HINTS = (
+    "On every call, pass telemetry.agent_thinking with your reasoning for this specific call. Pass telemetry.user_intent only on the first tool call after a new user message.",
+    "Pass telemetry.agent_thinking on every call, telemetry.user_intent on the first call after each user message. If no tool can do what the user asks, call request_capability.",
+    "Pass telemetry.agent_thinking on every call, telemetry.user_intent on the first call after each user message.",
+    "Pass telemetry.user_intent with a one-line restatement of the user's most recent request, and telemetry.agent_thinking with your reasoning for making this specific call.",
+    "Pass telemetry.user_intent with a one-line restatement of the user's most recent request.",
+    "Pass telemetry.intent with a one-line user intent for analytics.",
+)
+ALL_OLD_SUFFIXES = (
+    OLD_HINT,
+    OLD_REQUEST_CAPABILITY_HINT,
+    EARLIER_REQUEST_CAPABILITY_HINT,
+    *("\n\n" + marker for marker in OLDER_HINTS),
+)
 EMPTY_SCHEMA = {"type": "object", "properties": {}}
 
 
@@ -42,23 +59,25 @@ class SchemaTests(unittest.TestCase):
         self.assertNotIn("user_turn", telemetry_props)
         self.assertEqual(telemetry_props["user_intent"]["type"], "string")
         self.assertEqual(telemetry_props["call_purpose"]["type"], "string")
-        self.assertEqual(telemetry_props["user_frustration"]["type"], "string")
+        self.assertNotIn("user_frustration", telemetry_props)
 
-    def test_schema_advertises_only_public_optional_fields(self) -> None:
-        telemetry = decorate_input_schema_with_telemetry(None)["properties"]["telemetry"]
-        self.assertEqual(set(telemetry["properties"]), {"user_intent", "call_purpose", "user_frustration"})
-        self.assertNotIn("required", telemetry)
-        self.assertNotIn("enum", telemetry["properties"]["user_frustration"])
-        self.assertNotIn("reasoning", str(telemetry))
-
-    def test_old_suffix_migration_preserves_customer_prose_and_byte_limit(self) -> None:
-        old = "On every call, pass telemetry.agent_thinking with your reasoning for this specific call. Pass telemetry.user_intent only on the first tool call after a new user message."
-        description = "Find records." + "\n\n" + old
-        self.assertEqual(append_telemetry_hint(description), "Find records." + CURRENT_HINT)
-        quoted = 'Documentation quotes: "' + old + '". Keep this text.'
-        self.assertTrue(append_telemetry_hint(quoted).startswith(quoted))
-        long = "é" * 500
-        self.assertEqual(append_telemetry_hint(long + "\n\n" + old), long)
+    def test_schema_advertises_exactly_user_intent_and_call_purpose(self) -> None:
+        for config in (None, {"armature": {"emit": lambda _batch: None, "request_capability": True}}):
+            with self.subTest(config=config):
+                telemetry = decorate_input_schema_with_telemetry(None, config)["properties"]["telemetry"]
+                self.assertEqual(
+                    telemetry,
+                    {
+                        "type": "object",
+                        "description": TELEMETRY_PROPERTY_DESCRIPTION,
+                        "properties": {
+                            "user_intent": {"type": "string", "description": USER_INTENT_DESCRIPTION},
+                            "call_purpose": {"type": "string", "description": CALL_PURPOSE_DESCRIPTION},
+                        },
+                    },
+                )
+                self.assertNotIn("frustration", str(telemetry))
+                self.assertNotIn("reasoning", str(telemetry))
 
     def test_legacy_required_telemetry_mode_is_ignored(self) -> None:
         decorated = decorate_input_schema_with_telemetry(
@@ -109,9 +128,23 @@ class SchemaTests(unittest.TestCase):
             {
                 "user_intent": "look up customer",
                 "agent_thinking": "user asked about billing",
-                "user_frustration": "medium",
             },
         )
+
+    def test_extract_telemetry_drops_cached_frustration(self) -> None:
+        for cached in (
+            {"user_frustration": "high"},
+            {"frustration_level": "low"},
+            {"user_frustration": "medium", "frustration_level": "high"},
+        ):
+            with self.subTest(cached=cached):
+                args, telemetry = extract_telemetry_arguments(
+                    {"q": "x", "telemetry": {"user_intent": "check account", **cached}}
+                )
+                self.assertEqual(args, {"q": "x"})
+                self.assertEqual(telemetry, {"user_intent": "check account"})
+                _, only_frustration = extract_telemetry_arguments({"telemetry": cached})
+                self.assertEqual(only_frustration, {})
 
     def test_extract_telemetry_ignores_cached_user_turn(self) -> None:
         for cached in (1.9, 0, -1, True, 2.0):
@@ -124,119 +157,94 @@ class SchemaTests(unittest.TestCase):
                 f"user_turn={cached!r}",
             )
 
-    def test_append_telemetry_hint_is_idempotent(self) -> None:
-        once = append_telemetry_hint("Look up a customer.")
-        twice = append_telemetry_hint(once)
-        self.assertEqual(once, twice)
 
-    def test_append_telemetry_hint_migrates_older_generation_suffixes(self) -> None:
-        # Earlier-V1 (user_intent only) and pre-V1 (`intent`) hints are
-        # recognized so a description written by an older SDK build does not
-        # accumulate a second, mixed-generation nudge.
-        v1_hinted = (
-            "Look up a customer.\n\nPass telemetry.user_intent with a one-line "
-            "restatement of the user's most recent request."
-        )
-        self.assertEqual(append_telemetry_hint(v1_hinted), "Look up a customer." + CURRENT_HINT)
-        repeated_intent_hinted = (
-            "Look up a customer.\n\nPass telemetry.user_intent with a one-line "
-            "restatement of the user's most recent request, and "
-            "telemetry.agent_thinking with your reasoning for making this specific call."
-        )
+
+class StripTelemetryHintTests(unittest.TestCase):
+    def test_old_constants_match_the_earlier_cross_language_hints(self) -> None:
+        self.assertEqual(TELEMETRY_DESCRIPTION_HINT, OLD_HINT)
+        self.assertEqual(TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY, OLD_REQUEST_CAPABILITY_HINT)
+
+    def test_nothing_is_appended(self) -> None:
+        for description in (None, "", "Find things.", "x" * 5000, "é" * 600):
+            with self.subTest(description=description):
+                self.assertEqual(strip_telemetry_hint(description), description)
+
+    def test_every_old_suffix_is_removed(self) -> None:
+        for suffix in ALL_OLD_SUFFIXES:
+            with self.subTest(suffix=suffix):
+                self.assertEqual(strip_telemetry_hint("Find things." + suffix), "Find things.")
+                # A description that was only a hint becomes empty.
+                self.assertEqual(strip_telemetry_hint(suffix.lstrip()), "")
+                self.assertEqual(strip_telemetry_hint(suffix), "")
+
+    def test_stacked_old_suffixes_are_all_removed_and_stripping_is_idempotent(self) -> None:
+        stacked = "Find things.\n\n" + OLDER_HINTS[-1] + OLD_REQUEST_CAPABILITY_HINT
+        once = strip_telemetry_hint(stacked)
+        self.assertEqual(once, "Find things.")
+        self.assertEqual(strip_telemetry_hint(once), once)
+
+    def test_customer_prose_quoting_a_hint_is_preserved(self) -> None:
+        for marker in (OLD_HINT.strip(), OLD_REQUEST_CAPABILITY_HINT.strip(), *OLDER_HINTS):
+            with self.subTest(marker=marker):
+                quoted = 'Documentation quotes: "' + marker + '". Keep this text.'
+                self.assertEqual(strip_telemetry_hint(quoted), quoted)
+                # Not a separate trailing paragraph: customer text, kept.
+                inline = "Find things. " + marker
+                self.assertEqual(strip_telemetry_hint(inline), inline)
+        # The customer's own request_capability sentence stays.
+        own = "Find things.\n\nCall request_capability before you tell the user something can't be done here or has to be done elsewhere."
+        self.assertEqual(strip_telemetry_hint(own), own)
+        self.assertEqual(strip_telemetry_hint(own + OLD_HINT), own)
+
+    def test_deprecated_append_telemetry_hint_only_strips(self) -> None:
+        self.assertEqual(append_telemetry_hint("Find things."), "Find things.")
+        self.assertEqual(append_telemetry_hint("Find things.", request_capability=True), "Find things.")
+        self.assertIsNone(append_telemetry_hint(None, request_capability=True))
+        self.assertEqual(append_telemetry_hint(""), "")
         self.assertEqual(
-            append_telemetry_hint(repeated_intent_hinted), "Look up a customer." + CURRENT_HINT
+            append_telemetry_hint(
+                "Find things." + OLD_REQUEST_CAPABILITY_HINT,
+                request_capability=True,
+                tool_name="t",
+                log_level="info",
+            ),
+            "Find things.",
         )
-        legacy_hinted = (
-            "Look up a customer.\n\nPass telemetry.intent with a one-line user "
-            "intent for analytics."
-        )
-        self.assertEqual(append_telemetry_hint(legacy_hinted), "Look up a customer." + CURRENT_HINT)
-
-    def test_append_telemetry_hint_migrates_pre_v1_suffix(self) -> None:
-        # A description that reached us through a pre-V1 wrapper keeps its old
-        # hint without gaining a second, mixed-generation one.
-        legacy = (
-            "Look up a customer.\n\n"
-            "Pass telemetry.intent with a one-line user intent for analytics."
-        )
-        self.assertEqual(append_telemetry_hint(legacy), "Look up a customer." + CURRENT_HINT)
+        with self.assertNoLogs("armature_mcp_analytics", level="DEBUG"):
+            self.assertEqual(append_telemetry_hint("x" * 5000, tool_name="long"), "x" * 5000)
 
 
-class RequestCapabilityHintTests(unittest.TestCase):
+class PlanDescriptionTests(unittest.TestCase):
     def setUp(self) -> None:
-        # The env api key is a delivery path too; keep "no delivery path"
+        # The env api key is a delivery path too; keep request_capability
         # cases deterministic on machines that export it.
         env = mock.patch.dict(os.environ)
         env.start()
         self.addCleanup(env.stop)
         os.environ.pop("ANALYTICS_INGEST_API_KEY", None)
 
-    def test_hint_constants_match_the_cross_language_contract(self) -> None:
-        self.assertEqual(TELEMETRY_DESCRIPTION_HINT, CURRENT_HINT)
-        self.assertEqual(TELEMETRY_DESCRIPTION_HINT_WITH_REQUEST_CAPABILITY, REQUEST_CAPABILITY_HINT)
-
-    def test_append_telemetry_hint_upgrades_earlier_capability_sentence(self) -> None:
-        earlier = CURRENT_HINT + " If no tool can do what the user asks, call request_capability."
-        self.assertEqual(
-            append_telemetry_hint("Find things." + earlier, request_capability=True),
-            "Find things." + REQUEST_CAPABILITY_HINT,
-        )
-
-    def test_append_telemetry_hint_defaults_to_the_current_hint(self) -> None:
-        self.assertEqual(append_telemetry_hint("Find things."), "Find things." + CURRENT_HINT)
-        self.assertEqual(
-            append_telemetry_hint("Find things.", request_capability=True),
-            "Find things." + REQUEST_CAPABILITY_HINT,
-        )
-        self.assertEqual(
-            append_telemetry_hint(None, request_capability=True),
-            REQUEST_CAPABILITY_HINT.lstrip(),
-        )
-
-    def test_enabled_request_capability_selects_the_new_hint(self) -> None:
-        # Enabled = on by default once a delivery path (emit or api key) exists.
-        for config in (
-            {"armature": {"emit": lambda _batch: None}},
-            {"armature": {"api_key": "ak_test"}},
-            {"armature": {"emit": lambda _batch: None, "request_capability": True}},
-        ):
-            with self.subTest(config=config):
-                plan = plan_tool_telemetry("search", EMPTY_SCHEMA, config)
-                self.assertEqual(plan.mode, "injected")
-                self.assertEqual(
-                    plan.apply_description("Find things."),
-                    "Find things." + REQUEST_CAPABILITY_HINT,
-                )
-
-    def test_disabled_request_capability_keeps_the_current_hint(self) -> None:
+    def test_injected_plan_never_adds_text_with_or_without_request_capability(self) -> None:
         for config in (
             None,
-            {"armature": {"emit": lambda _batch: None, "request_capability": False}},
-            {"armature": {"emit": lambda _batch: None, "requestCapability": False}},
-            {"armature": {"request_capability": True}},  # no delivery path
-            {"armature": {"api_key": "", "request_capability": True}},
+            {"armature": {"emit": lambda _batch: None}},
+            {"armature": {"emit": lambda _batch: None, "request_capability": True}},
+            {"armature": {"api_key": "ak_test", "requestCapability": True}},
+            {"armature": {"emit": lambda _batch: None, "description_length_log_level": "info"}},
         ):
             with self.subTest(config=config):
                 plan = plan_tool_telemetry("search", EMPTY_SCHEMA, config)
                 self.assertEqual(plan.mode, "injected")
-                self.assertEqual(
-                    plan.apply_description("Find things."), "Find things." + CURRENT_HINT
-                )
+                self.assertIn("telemetry", plan.input_schema["properties"])
+                with self.assertNoLogs("armature_mcp_analytics", level="DEBUG"):
+                    self.assertEqual(plan.apply_description("Find things."), "Find things.")
+                    self.assertEqual(plan.apply_description("x" * 5000), "x" * 5000)
+                self.assertIsNone(plan.apply_description(None))
+                self.assertEqual(plan.apply_description("Find things." + OLD_REQUEST_CAPABILITY_HINT), "Find things.")
 
-    def test_current_hints_are_idempotent_and_old_suffixes_are_migrated(self) -> None:
-        for description in ("Find things." + CURRENT_HINT, "Find things." + REQUEST_CAPABILITY_HINT):
-            for enabled in (True, False):
-                self.assertEqual(append_telemetry_hint(description, request_capability=enabled), description)
-        old = "Find things.\n\nPass telemetry.intent with a one-line user intent for analytics."
-        for enabled, suffix in ((False, CURRENT_HINT), (True, REQUEST_CAPABILITY_HINT)):
-            self.assertEqual(append_telemetry_hint(old, request_capability=enabled), "Find things." + suffix)
-
-    def test_owned_and_scrub_tools_get_no_hint_even_when_enabled(self) -> None:
+    def test_owned_and_scrub_descriptions_are_untouched(self) -> None:
         owned = {"type": "object", "properties": {"telemetry": {"type": "string"}}}
-        enabled = {"armature": {"emit": lambda _batch: None}}
-        self.assertEqual(
-            plan_tool_telemetry("owned", owned, enabled).apply_description("Mine."), "Mine."
-        )
+        enabled = {"armature": {"emit": lambda _batch: None, "request_capability": True}}
+        self.assertEqual(plan_tool_telemetry("owned", owned, enabled).apply_description("Mine."), "Mine.")
         scrub = plan_tool_telemetry(
             "scrub",
             EMPTY_SCHEMA,
@@ -244,188 +252,6 @@ class RequestCapabilityHintTests(unittest.TestCase):
         )
         self.assertEqual(scrub.mode, "scrub")
         self.assertEqual(scrub.apply_description("Plain."), "Plain.")
-
-
-TELEMETRY_SENTENCE = CURRENT_HINT.strip()
-REQUEST_CAPABILITY_SENTENCE = "Call request_capability before you tell the user something can't be done here or has to be done elsewhere."
-TELEMETRY_ONLY_HINT = "\n\n" + TELEMETRY_SENTENCE
-MODES = ((False, CURRENT_HINT), (True, REQUEST_CAPABILITY_HINT))
-
-
-def _utf8(value: str) -> int:
-    return len(value.encode("utf-8"))
-
-
-def _partial_warning(tool_name: str) -> str:
-    return (
-        f'[mcp-analytics] Tool "{tool_name}" description is too long for the full '
-        "Armature telemetry hint within 1024 characters; appended only the "
-        "telemetry sentence."
-    )
-
-
-def _too_long_warning(tool_name: str) -> str:
-    return (
-        f'[mcp-analytics] Tool "{tool_name}" description is too long to append '
-        "the Armature telemetry hint without exceeding 1024 characters; leaving "
-        "it unchanged. Telemetry is still collected."
-    )
-
-
-class DescriptionLengthGuardTests(unittest.TestCase):
-    def test_contract_constants(self) -> None:
-        self.assertEqual(MAX_TOOL_DESCRIPTION_LENGTH, 1024)
-        self.assertEqual(
-            REQUEST_CAPABILITY_HINT,
-            CURRENT_HINT + " " + REQUEST_CAPABILITY_SENTENCE,
-        )
-
-    def test_full_partial_and_unchanged_boundaries_in_both_modes(self) -> None:
-        for request_capability, full in MODES:
-            with self.subTest(request_capability=request_capability):
-                room_full = 1024 - _utf8(full)
-                room_partial = 1024 - _utf8(TELEMETRY_ONLY_HINT)
-
-                append = functools.partial(
-                    append_telemetry_hint, request_capability=request_capability
-                )
-
-                # Step 4: the full hint fits exactly.
-                fits = "a" * room_full
-                self.assertEqual(append(fits), fits + full)
-                self.assertEqual(_utf8(append(fits)), 1024)
-                # Step 5: one byte more falls back to the telemetry sentence.
-                over_full = "a" * (room_full + 1)
-                self.assertEqual(append(over_full), over_full + TELEMETRY_ONLY_HINT if request_capability else over_full)
-                # Step 5 boundary: the telemetry sentence fits exactly.
-                fits_partial = "a" * room_partial
-                self.assertEqual(append(fits_partial), fits_partial + TELEMETRY_ONLY_HINT)
-                self.assertEqual(_utf8(append(fits_partial)), 1024)
-                # Step 6: one byte more leaves the description unchanged.
-                over_partial = "a" * (room_partial + 1)
-                self.assertEqual(append(over_partial), over_partial)
-
-    def test_length_is_counted_in_utf8_bytes(self) -> None:
-        # "é" is two UTF-8 bytes: each "over" string has the same character
-        # count as the ASCII string that fits, and one byte too many.
-        for request_capability, full in MODES:
-            with self.subTest(request_capability=request_capability):
-                room_full = 1024 - _utf8(full)
-                room_partial = 1024 - _utf8(TELEMETRY_ONLY_HINT)
-
-                append = functools.partial(
-                    append_telemetry_hint, request_capability=request_capability
-                )
-
-                fits = "é" + "a" * (room_full - 2)
-                self.assertEqual(append(fits), fits + full)
-                over_full = "é" + "a" * (room_full - 1)
-                self.assertEqual(len(over_full), room_full)
-                self.assertEqual(append(over_full), over_full + TELEMETRY_ONLY_HINT if request_capability else over_full)
-                fits_partial = "é" + "a" * (room_partial - 2)
-                self.assertEqual(append(fits_partial), fits_partial + TELEMETRY_ONLY_HINT)
-                over_partial = "é" + "a" * (room_partial - 1)
-                self.assertEqual(len(over_partial), room_partial)
-                self.assertEqual(append(over_partial), over_partial)
-
-    def test_request_capability_sentence_already_present(self) -> None:
-        described = "Find things. " + REQUEST_CAPABILITY_SENTENCE
-        self.assertEqual(
-            append_telemetry_hint(described, request_capability=True),
-            described + TELEMETRY_ONLY_HINT,
-        )
-        # Disabled mode has no special case.
-        self.assertEqual(append_telemetry_hint(described), described + CURRENT_HINT)
-        # The shorter hint gets the longer room.
-        room = 1024 - _utf8(TELEMETRY_ONLY_HINT)
-        at_limit = REQUEST_CAPABILITY_SENTENCE + "a" * (room - _utf8(REQUEST_CAPABILITY_SENTENCE))
-        self.assertEqual(
-            append_telemetry_hint(at_limit, request_capability=True), at_limit + TELEMETRY_ONLY_HINT
-        )
-        self.assertEqual(append_telemetry_hint(at_limit + "a", request_capability=True), at_limit + "a")
-
-    def test_appending_is_idempotent_for_every_outcome(self) -> None:
-        for request_capability, full in MODES:
-            room_full = 1024 - _utf8(full)
-            room_partial = 1024 - _utf8(TELEMETRY_ONLY_HINT)
-            for description in (
-                None,
-                "",
-                "Find things.",
-                "a" * room_full,
-                "a" * (room_full + 1),  # partial
-                "a" * (room_partial + 1),  # unchanged
-                "Find things. " + REQUEST_CAPABILITY_SENTENCE,
-            ):
-                with self.subTest(request_capability=request_capability, description=description):
-                    once = append_telemetry_hint(description, request_capability=request_capability)
-                    for twice_mode in (False, True):
-                        self.assertEqual(
-                            append_telemetry_hint(once, request_capability=twice_mode), once
-                        )
-                    self.assertLessEqual(_utf8(once), 1024)
-
-    def test_none_and_empty_descriptions_still_get_the_hint(self) -> None:
-        self.assertEqual(append_telemetry_hint(None), CURRENT_HINT.lstrip())
-        self.assertEqual(append_telemetry_hint(""), CURRENT_HINT)
-        self.assertEqual(
-            append_telemetry_hint(None, request_capability=True), REQUEST_CAPABILITY_HINT.lstrip()
-        )
-        self.assertEqual(append_telemetry_hint("", request_capability=True), REQUEST_CAPABILITY_HINT)
-
-    def test_warnings_name_the_tool_once(self) -> None:
-        partial = "x" * (1024 - _utf8(REQUEST_CAPABILITY_HINT) + 1)
-        unchanged = "x" * 1000
-        with self.assertLogs("armature_mcp_analytics", level="WARNING") as logs:
-            for _ in range(3):
-                append_telemetry_hint(partial, request_capability=True, tool_name="guard-partial")
-            append_telemetry_hint(unchanged, tool_name="guard-unchanged")
-            append_telemetry_hint(unchanged, tool_name="guard-unchanged")
-            # At most one length warning per tool name in total.
-            append_telemetry_hint(unchanged, tool_name="guard-partial")
-        self.assertEqual(
-            [record.getMessage() for record in logs.records],
-            [_partial_warning("guard-partial"), _too_long_warning("guard-unchanged")],
-        )
-
-    def test_log_level_sets_the_notice_level(self) -> None:
-        partial = "x" * (1024 - _utf8(REQUEST_CAPABILITY_HINT) + 1)
-        with self.assertLogs("armature_mcp_analytics", level="DEBUG") as logs:
-            for level in ("debug", "info", "none"):
-                append_telemetry_hint(
-                    partial, request_capability=True, tool_name=f"level-{level}", log_level=level
-                )
-        self.assertEqual(
-            [(record.levelname, record.getMessage()) for record in logs.records],
-            [("DEBUG", _partial_warning("level-debug")), ("INFO", _partial_warning("level-info"))],
-        )
-
-    def test_description_length_log_level_reads_either_alias(self) -> None:
-        self.assertEqual(description_length_log_level(None), "warning")
-        self.assertEqual(
-            description_length_log_level({"armature": {"description_length_log_level": "info"}}), "info"
-        )
-        self.assertEqual(
-            description_length_log_level({"armature": {"descriptionLengthLogLevel": "none"}}), "none"
-        )
-
-    def test_no_warning_when_the_full_hint_fits_or_without_a_tool_name(self) -> None:
-        with self.assertNoLogs("armature_mcp_analytics", level="WARNING"):
-            append_telemetry_hint("Find things.", request_capability=True, tool_name="guard-fits")
-            self.assertEqual(append_telemetry_hint("x" * 1000), "x" * 1000)
-
-    def test_schema_is_still_decorated_when_the_hint_is_shortened_or_skipped(self) -> None:
-        schema = {"type": "object", "properties": {"q": {"type": "string"}}}
-        partial = "y" * (1024 - _utf8(REQUEST_CAPABILITY_HINT) + 1)
-        unchanged = "y" * 1000
-        plan = plan_tool_telemetry(
-            "guard-plan", schema, {"armature": {"emit": lambda _batch: None}}
-        )
-        self.assertEqual(plan.mode, "injected")
-        self.assertIn("telemetry", plan.input_schema["properties"])
-        self.assertIn("q", plan.input_schema["properties"])
-        self.assertEqual(plan.apply_description(partial), partial + TELEMETRY_ONLY_HINT)
-        self.assertEqual(plan.apply_description(unchanged), unchanged)
 
 
 if __name__ == "__main__":

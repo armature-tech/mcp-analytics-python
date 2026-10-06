@@ -44,6 +44,7 @@ RedactEventHook = Callable[
 # Opt-in export of customer-owned argument fields as Armature telemetry
 # (gap #11). Keys are the V1 telemetry field names; values are top-level
 # argument property names to READ (never strip) from the tool's arguments.
+# A "user_frustration" key is accepted and ignored.
 TelemetryFieldMap = Mapping[str, str]
 
 
@@ -58,10 +59,13 @@ class TelemetryArgs(TypedDict, total=False):
     call_purpose: str
     # Legacy input and canonical event field.
     agent_thinking: str
+    # Deprecated: no longer advertised. Accepted from cached clients, stripped
+    # with the telemetry argument and never exported; never populated by the SDK.
     user_frustration: str
-    # Deprecated pre-V1 spellings; still accepted.
+    # Deprecated pre-V1 spellings; intent/context still accepted.
     intent: str
     context: str
+    # Deprecated pre-V1 spelling of user_frustration: stripped, never exported.
     frustration_level: str
 
 
@@ -109,10 +113,10 @@ class ArmatureConfig(TypedDict, total=False):
     timeout_ms: int | float
     timeoutMs: int | float
     # Master switch for conversation-derived telemetry (user_intent,
-    # call_purpose, user_frustration). Default True. When False
-    # the SDK injects no telemetry schema/parameter, appends no description
-    # nudges, and never exports telemetry values — including values sent by
-    # clients holding a cached schema, which are stripped and dropped.
+    # call_purpose). Default True. When False the SDK injects no telemetry
+    # schema/parameter and never exports telemetry values — including values
+    # sent by clients holding a cached schema, which are stripped and dropped.
+    # The SDK never adds text to tool descriptions either way.
     capture_telemetry: bool
     captureTelemetry: bool
     redact_secrets: bool
@@ -123,12 +127,18 @@ class ArmatureConfig(TypedDict, total=False):
     schedule: Callable[[Awaitable[None]], Any]
     telemetry_field_map: TelemetryFieldMap
     telemetryFieldMap: TelemetryFieldMap
-    # SDK-owned request_capability tool: on by default when a delivery path is
-    # configured. Set either alias to False to disable.
+    # SDK-owned send_feedback tool: on by default when a delivery path is
+    # configured. Set to False to disable. Set to True, a customer tool named
+    # send_feedback is rejected as reserved. No other tool's description
+    # mentions it.
+    send_feedback: bool
+    sendFeedback: bool
+    # Deprecated aliases of send_feedback (the tool's earlier name); the new
+    # key wins when both are set.
     request_capability: bool
     requestCapability: bool
-    # Level of the one-time notice for a tool description too long for the
-    # full telemetry hint: "none", "debug", "info" or "warning" (default).
+    # Deprecated: accepted and ignored. The SDK no longer appends text to tool
+    # descriptions, so there is no description-length notice to log.
     description_length_log_level: DescriptionLengthLogLevel
     descriptionLengthLogLevel: DescriptionLengthLogLevel
 

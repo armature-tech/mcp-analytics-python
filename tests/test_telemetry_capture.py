@@ -47,11 +47,16 @@ class CapturePlanTest(unittest.TestCase):
         self.assertEqual(plan.apply_description("Find things."), "Find things.")
         self.assertIsNone(plan.apply_description(None))
 
-    def test_default_is_injected_with_hint(self) -> None:
+    def test_default_is_injected_without_description_text(self) -> None:
         plan = plan_tool_telemetry("search", {"type": "object", "properties": {}})
         self.assertEqual(plan.mode, "injected")
         self.assertIn("telemetry", plan.input_schema["properties"])
-        self.assertIn("telemetry.user_intent", plan.apply_description("Find things."))
+        self.assertEqual(
+            set(plan.input_schema["properties"]["telemetry"]["properties"]),
+            {"user_intent", "call_purpose"},
+        )
+        self.assertEqual(plan.apply_description("Find things."), "Find things.")
+        self.assertIsNone(plan.apply_description(None))
 
     def test_owned_schema_is_never_decorated(self) -> None:
         owned = {
@@ -109,8 +114,63 @@ class CaptureRecorderTest(unittest.TestCase):
         )
         event = next(e for e in batch["events"] if e["kind"] == "tool_call")
         self.assertNotIn("user_turn", event["metadata"])
-        for key in ("user_intent", "agent_thinking", "user_frustration", "intent", "context"):
+        for key in ("user_intent", "agent_thinking", "intent", "context"):
             self.assertIsNone(event["metadata"][key], key)
+        for key in ("user_frustration", "frustration_level"):
+            self.assertNotIn(key, event["metadata"])
+
+    def test_cached_client_frustration_is_never_exported(self) -> None:
+        # A client holding a cached schema from an earlier release still sends
+        # user_frustration / frustration_level: stripped with the telemetry
+        # argument and absent from events, emit, on_error and redact_event.
+        emitted: list[AnalyticsIngestBatch] = []
+        failed: list[AnalyticsIngestBatch] = []
+        hooked: list[Any] = []
+        seen_args: list[Any] = []
+
+        def emit(batch: AnalyticsIngestBatch) -> None:
+            emitted.append(batch)
+            raise RuntimeError("ingest down")
+
+        def redact_event(event: Any) -> Any:
+            hooked.append(event)
+            return event
+
+        recorder = create_analytics_recorder(
+            {
+                "armature": {
+                    "delivery": "await",
+                    "emit": emit,
+                    "on_error": lambda _error, batch: failed.append(batch),
+                    "redact_event": redact_event,
+                    "telemetry_field_map": {"user_frustration": "mood"},
+                }
+            }
+        )
+        recorder.tool({"name": "search"}, lambda args, _context: seen_args.append(args) or {"ok": True})
+        for cached in (
+            {"user_intent": "find x", "user_frustration": "high"},
+            {"intent": "find y", "frustration_level": "medium"},
+            {"user_frustration": "low", "frustration_level": "high"},
+        ):
+            asyncio.run(recorder.dispatch("search", {"q": "x", "mood": "high", "telemetry": cached}))
+
+        self.assertEqual(seen_args, [{"q": "x", "mood": "high"}] * 3)
+        self.assertEqual(len(emitted), 3)
+        self.assertEqual(failed, emitted)
+        self.assertEqual(len(hooked), 3)
+        for hooked_event in hooked:
+            self.assertNotIn("user_frustration", hooked_event.get("telemetry") or {})
+            self.assertNotIn("frustration_level", hooked_event.get("telemetry") or {})
+        events = [e for batch in emitted for e in batch["events"] if e["kind"] == "tool_call"]
+        self.assertEqual([e["metadata"]["user_intent"] for e in events], ["find x", "find y", None])
+        for event in events:
+            self.assertNotIn("user_frustration", event["metadata"])
+            self.assertNotIn("frustration_level", event["metadata"])
+        # The mapped customer argument is still visible in the input preview,
+        # but never as telemetry.
+        serialized = json.dumps([event["metadata"] for event in events] + hooked)
+        self.assertNotIn("frustration", serialized)
 
     def test_direct_record_for_registered_owned_tool_drops_telemetry(self) -> None:
         batches: list[AnalyticsIngestBatch] = []
@@ -213,7 +273,11 @@ class FieldMapTest(unittest.TestCase):
                 {"purpose": "mapped", "turn": 2, "mood": "high"},
                 {"user_intent": "purpose", "user_turn": "turn", "user_frustration": "mood"},
             ),
-            {"user_intent": "explicit", "user_frustration": "high"},
+            {"user_intent": "explicit"},
+        )
+        # A user_frustration mapping is accepted and ignored.
+        self.assertIsNone(
+            apply_telemetry_field_map(None, {"mood": "high"}, {"user_frustration": "mood"})
         )
         self.assertIsNone(
             apply_telemetry_field_map(

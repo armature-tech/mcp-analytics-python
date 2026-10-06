@@ -8,14 +8,15 @@ from dataclasses import dataclass
 from typing import Annotated, Any
 
 from .capability import (
-    REQUEST_CAPABILITY_ACKNOWLEDGMENT,
-    REQUEST_CAPABILITY_ANNOTATIONS,
-    REQUEST_CAPABILITY_ARGUMENT_DESCRIPTION,
-    REQUEST_CAPABILITY_DESCRIPTION,
-    REQUEST_CAPABILITY_TOOL_NAME,
-    request_capability_enabled,
-    request_capability_explicit,
-    request_capability_registration,
+    SEND_FEEDBACK_ACKNOWLEDGMENT,
+    SEND_FEEDBACK_ANNOTATIONS,
+    SEND_FEEDBACK_ARGUMENT_DESCRIPTION,
+    SEND_FEEDBACK_DESCRIPTION,
+    SEND_FEEDBACK_TOOL_NAME,
+    send_feedback_enabled,
+    send_feedback_explicit,
+    send_feedback_registration,
+    send_feedback_reserved_error,
 )
 from .recorder import AnalyticsRecorder, create_analytics_recorder
 from .sdk_v2 import (
@@ -29,12 +30,11 @@ from .sdk_v2 import (
     warn_mcp2_unknown_server,
 )
 from .schema import (
-    append_telemetry_hint,
     create_telemetry_json_schema,
     decorate_input_schema_with_telemetry,
-    description_length_log_level,
     is_capture_enabled,
     schema_declares_telemetry,
+    strip_telemetry_hint,
     warn_telemetry_collision,
 )
 from .types import AnalyticsConfig, TelemetryMode
@@ -136,7 +136,7 @@ def _capability_annotation() -> Any:
         WithJsonSchema(
             {
                 "type": "string",
-                "description": REQUEST_CAPABILITY_ARGUMENT_DESCRIPTION,
+                "description": SEND_FEEDBACK_ARGUMENT_DESCRIPTION,
                 "minLength": 1,
                 "maxLength": 1000,
             }
@@ -718,67 +718,70 @@ def instrument_fastmcp(server: Any, config: AnalyticsConfig | None = None) -> Fa
         # attribution, so say so loudly up front (never crash).
         warn_mcp2_unknown_server(server)
     supports_schema_kwargs = _supports_schema_kwargs(original_tool)
-    # Injected-mode descriptions point agents at request_capability whenever
-    # the config enables it (same predicate as the recorder and the other
-    # SDKs); a customer tool that keeps the name still answers to it.
-    advertise_request_capability = request_capability_enabled(config)
+    # The SDK-owned send_feedback tool is on by default once a delivery path
+    # exists (same predicate as the recorder and the other SDKs). No other
+    # tool's description mentions it. Set explicitly to True, a name collision
+    # or a server that cannot register it is an error; on merely by default,
+    # the SDK yields to a customer tool of the same name and skips quietly.
+    feedback_enabled = send_feedback_enabled(config)
+    feedback_explicit = feedback_enabled and send_feedback_explicit(config)
+    inject_send_feedback = feedback_enabled
+    if inject_send_feedback and _server_has_tool_named(server, SEND_FEEDBACK_TOOL_NAME):
+        if feedback_explicit:
+            raise send_feedback_reserved_error()
+        inject_send_feedback = False
 
-    should_inject_request_capability = advertise_request_capability
-    if should_inject_request_capability and _server_has_tool_named(
-        server, REQUEST_CAPABILITY_TOOL_NAME
-    ):
-        # Reserved only when the caller explicitly opted in; when on by default
-        # the customer's pre-existing tool of the same name wins and the SDK
-        # skips its own injection instead of raising on upgrade.
-        if request_capability_explicit(config):
-            raise ValueError(
-                "Tool name 'request_capability' is reserved while "
-                "armature.request_capability is enabled."
-            )
-        should_inject_request_capability = False
+    if inject_send_feedback:
 
-    if should_inject_request_capability:
-
-        def request_capability(capability: str) -> str:
+        def send_feedback(capability: str) -> str:
             if not capability.strip() or len(capability) > 1000:
                 raise ValueError(
                     "capability must be a non-empty string of at most 1000 characters"
                 )
-            return REQUEST_CAPABILITY_ACKNOWLEDGMENT
+            return SEND_FEEDBACK_ACKNOWLEDGMENT
 
-        request_capability.__doc__ = REQUEST_CAPABILITY_DESCRIPTION
-        wrapped_request_capability = _wrap_handler(
+        send_feedback.__doc__ = SEND_FEEDBACK_DESCRIPTION
+        wrapped_send_feedback = _wrap_handler(
             recorder,
-            REQUEST_CAPABILITY_TOOL_NAME,
-            request_capability,
+            SEND_FEEDBACK_TOOL_NAME,
+            send_feedback,
             "scrub",
             capability_request=True,
         )
-        request_signature = inspect.signature(request_capability)
-        capability_parameter = request_signature.parameters["capability"].replace(
+        feedback_signature = inspect.signature(send_feedback)
+        capability_parameter = feedback_signature.parameters["capability"].replace(
             annotation=_capability_annotation()
         )
-        capability_signature = request_signature.replace(parameters=[capability_parameter])
+        feedback_signature = feedback_signature.replace(parameters=[capability_parameter])
         if _is_official_mcpserver(server):
-            capability_signature = _signature_with_injected_context(capability_signature)
-        wrapped_request_capability.__signature__ = capability_signature
-        wrapped_request_capability.__annotations__ = {
-            **getattr(wrapped_request_capability, "__annotations__", {}),
+            feedback_signature = _signature_with_injected_context(feedback_signature)
+        wrapped_send_feedback.__signature__ = feedback_signature
+        wrapped_send_feedback.__annotations__ = {
+            **getattr(wrapped_send_feedback, "__annotations__", {}),
             **{
                 parameter.name: parameter.annotation
-                for parameter in capability_signature.parameters.values()
+                for parameter in feedback_signature.parameters.values()
                 if parameter.annotation is not inspect.Parameter.empty
             },
         }
-        capability_kwargs: dict[str, Any] = {
-            "name": REQUEST_CAPABILITY_TOOL_NAME,
-            "description": REQUEST_CAPABILITY_DESCRIPTION,
+        feedback_kwargs: dict[str, Any] = {
+            "name": SEND_FEEDBACK_TOOL_NAME,
+            "description": SEND_FEEDBACK_DESCRIPTION,
         }
         if supports_schema_kwargs:
-            capability_kwargs["input_schema"] = request_capability_registration()["inputSchema"]
+            feedback_kwargs["input_schema"] = send_feedback_registration()["inputSchema"]
         if _accepts_kwarg(original_tool, "annotations"):
-            capability_kwargs["annotations"] = _tool_annotations(REQUEST_CAPABILITY_ANNOTATIONS)
-        original_tool(**capability_kwargs)(wrapped_request_capability)
+            feedback_kwargs["annotations"] = _tool_annotations(SEND_FEEDBACK_ANNOTATIONS)
+        try:
+            original_tool(**feedback_kwargs)(wrapped_send_feedback)
+        except TypeError as error:
+            # The server's tool registrar does not take this registration
+            # shape (e.g. no name/description keywords).
+            if feedback_explicit:
+                raise ValueError(
+                    "armature.send_feedback is True but this server cannot register "
+                    f"the send_feedback tool ({error}). Set send_feedback=False."
+                ) from error
 
     def instrumenting_tool(*decorator_args: Any, **decorator_kwargs: Any):
         # Re-entry guard: fastmcp 2.x's deferred registration comes back
@@ -794,17 +797,10 @@ def instrument_fastmcp(server: Any, config: AnalyticsConfig | None = None) -> Fa
 
         def decorate(func: Any):
             name = decorator_kwargs.get("name") or (decorator_args[0] if decorator_args and isinstance(decorator_args[0], str) else None) or func.__name__
-            if (
-                request_capability_enabled(config)
-                and str(name) == REQUEST_CAPABILITY_TOOL_NAME
-                and request_capability_explicit(config)
-            ):
-                # Reserved only on explicit opt-in; on by default the customer's
-                # tool of the same name takes precedence.
-                raise ValueError(
-                    "Tool name 'request_capability' is reserved while "
-                    "armature.request_capability is enabled."
-                )
+            if feedback_explicit and str(name) == SEND_FEEDBACK_TOOL_NAME:
+                # Reserved only when send_feedback was explicitly set to True;
+                # on merely by default the customer's tool takes precedence.
+                raise send_feedback_reserved_error()
             kwargs_schema = _schema_from_kwargs(decorator_kwargs)
             # Ownership (TELEMETRY-CONTRACT.md, mode "owned"): the customer's
             # function signature or explicit schema kwarg already declares
@@ -821,13 +817,22 @@ def instrument_fastmcp(server: Any, config: AnalyticsConfig | None = None) -> Fa
             if telemetry_mode == "injected":
                 schema = decorate_input_schema_with_telemetry(kwargs_schema, config)
                 kwargs = _set_schema_kwargs(decorator_kwargs, schema, supports_schema_kwargs=supports_schema_kwargs)
-                kwargs["description"] = append_telemetry_hint(
-                    _description_from(func, decorator_kwargs),
-                    request_capability=advertise_request_capability,
-                    tool_name=str(name),
-                    log_level=description_length_log_level(config),
-                )
+            # The SDK adds nothing to the description. Injected tools only
+            # lose a hint suffix an earlier SDK release appended (e.g. a
+            # description copied from an older tools/list); any other
+            # description, or its absence, is left exactly as registered.
+            cleaned_description: str | None = None
+            if telemetry_mode == "injected":
+                description = _description_from(func, decorator_kwargs)
+                stripped = strip_telemetry_hint(description)
+                if stripped != description:
+                    cleaned_description = stripped
+                    kwargs["description"] = stripped
             wrapped = _wrap_handler(recorder, str(name), func, telemetry_mode)
+            if cleaned_description is not None:
+                # Servers that fall back to the docstring for an empty
+                # description must not read the hint back from it.
+                wrapped.__doc__ = cleaned_description
             wrapped_signature: inspect.Signature | None = None
             scrub_signature_attached = False
             if telemetry_mode == "injected":

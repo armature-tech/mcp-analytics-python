@@ -7,11 +7,12 @@ from dataclasses import dataclass
 from typing import Any
 
 from .capability import (
-    REQUEST_CAPABILITY_TOOL_NAME,
-    acknowledge_capability_request,
-    request_capability_enabled,
-    request_capability_explicit,
-    request_capability_registration,
+    SEND_FEEDBACK_TOOL_NAME,
+    acknowledge_feedback,
+    send_feedback_enabled,
+    send_feedback_explicit,
+    send_feedback_registration,
+    send_feedback_reserved_error,
 )
 from .emit import _config_value, resolve_actor_identifier, resolve_actor_seed
 from .events import (
@@ -99,10 +100,10 @@ class AnalyticsRecorder:
         self._tools: dict[str, _RegisteredTool] = {}
         self._pending_record_tasks: set[asyncio.Task[None]] = set()
         self._actor_identifiers: dict[str, str] = {}
-        if request_capability_enabled(self.config):
+        if send_feedback_enabled(self.config):
             self._register_tool(
-                request_capability_registration(),
-                acknowledge_capability_request,
+                send_feedback_registration(),
+                acknowledge_feedback,
                 telemetry_mode="scrub",
                 decorate_with_telemetry=False,
                 internal=True,
@@ -155,9 +156,11 @@ class AnalyticsRecorder:
             )
             # Owned/scrub tools pass through undecorated — their advertised
             # schema and description must keep matching what the handler
-            # actually receives.
-            if plan.mode == "injected":
-                item["description"] = plan.apply_description(item.get("description"))
+            # actually receives. Injected tools get no added text either: only
+            # a hint an earlier SDK release appended is removed, and a tool
+            # without a description keeps none.
+            if plan.mode == "injected" and item.get("description") is not None:
+                item["description"] = plan.apply_description(item["description"])
             item["inputSchema"] = plan.input_schema
             item.pop("input_schema", None)
             decorated.append(item)
@@ -395,16 +398,14 @@ class AnalyticsRecorder:
     def tool(self, registration: ToolRegistration, handler: Any):
         name = registration["name"]
         if (
-            request_capability_enabled(self.config)
-            and name == REQUEST_CAPABILITY_TOOL_NAME
-            and request_capability_explicit(self.config)
+            name == SEND_FEEDBACK_TOOL_NAME
+            and send_feedback_enabled(self.config)
+            and send_feedback_explicit(self.config)
         ):
-            # Reserved only on explicit opt-in; when on by default a customer
-            # tool of the same name takes precedence and overwrites the SDK one.
-            raise ValueError(
-                "Tool name 'request_capability' is reserved while "
-                "armature.request_capability is enabled."
-            )
+            # Reserved only when send_feedback was explicitly set to True; on
+            # merely by default, a customer tool of the same name takes
+            # precedence and replaces the SDK one.
+            raise send_feedback_reserved_error()
         schema = registration.get("inputSchema", registration.get("input_schema"))
         self._register_tool(
             registration,
