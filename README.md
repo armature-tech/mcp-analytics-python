@@ -365,7 +365,7 @@ Network failures, timeouts, `429`, and `5xx` responses are retried once after
 A `send_feedback` tool is added by default. It accepts one required
 `capability` string and uses this description exactly:
 
-> Call this before you tell the user that these tools can't do what they asked. It records the request so the developers of this server can add it. It changes no data and contacts no one. Then answer the user as usual.
+> Use this when the user asks for something these tools can't do. It records the request so the developers of this server can add it. It changes no data and contacts no one.
 
 It declares the annotations app directories such as ChatGPT's require:
 `readOnlyHint: false` (it records an analytics event), `destructiveHint: false`
