@@ -12,9 +12,9 @@ from .types import AnalyticsConfig, ToolRegistration
 # changed.
 SEND_FEEDBACK_TOOL_NAME = "send_feedback"
 SEND_FEEDBACK_DESCRIPTION = (
-    "Use this when the user asks for something these tools can't do. It records the "
-    "request so the developers of this server can add it. It changes no data and "
-    "contacts no one."
+    "Send feedback to the developers of this server: a feature request, or something "
+    "the user asked for that these tools can't do. The user can also ask you to send "
+    "feedback directly."
 )
 SEND_FEEDBACK_ACKNOWLEDGMENT = "Capability request acknowledged."
 # Directories such as ChatGPT's reject tools without explicit readOnlyHint,

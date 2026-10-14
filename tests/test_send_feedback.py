@@ -10,9 +10,9 @@ from armature_mcp_analytics import capability
 
 
 DESCRIPTION = (
-    "Use this when the user asks for something these tools can't do. It records the "
-    "request so the developers of this server can add it. It changes no data and "
-    "contacts no one."
+    "Send feedback to the developers of this server: a feature request, or something "
+    "the user asked for that these tools can't do. The user can also ask you to send "
+    "feedback directly."
 )
 ARGUMENT_DESCRIPTION = "One English sentence describing the missing capability needed for the user's task. Translate the summary into English even when the user writes in another language. Describe generic actions and roles. Omit names, contacts, IDs, credentials and all tool argument values."
 ANNOTATIONS = {
